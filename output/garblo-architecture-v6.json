@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Garblo - Kiến trúc bản thử nghiệm",
+    "subtitle": "Garblo là Lookbook Studio để phối và chỉnh đồ từ chính tủ đồ của bạn.",
+    "output": "garblo-architecture.html",
+    "quality_profile": "showcase",
+    "views": [
+      { "id": "lookbook-flow", "label": "Tạo lookbook", "focus": ["user", "mobile", "fastapi", "langchain", "azure-openai", "rustfs", "postgres"], "note": "Xem cách một ảnh đi từ khi tải lên đến lúc thành lookbook." },
+      { "id": "human-approval", "label": "AI & phê duyệt", "focus": ["mobile", "fastapi", "langchain", "azure-openai", "approval"], "note": "Bạn xem trước và phê duyệt các thay đổi trước khi hệ thống lưu hoặc đăng." },
+      { "id": "data-storage", "label": "Dữ liệu & lưu trữ", "focus": ["fastapi", "postgres", "rustfs"], "note": "PostgreSQL lưu thông tin và trạng thái; RustFS giữ ảnh gốc, ảnh đã tách và ảnh tạo ra." },
+      { "id": "style-social", "label": "Gu & kết nối", "focus": ["mobile", "fastapi", "postgres"], "note": "Swipe ghi nhận gu để gợi ý bạn cùng gu ở giai đoạn P2." }
+    ]
+  },
+  "components": [
+    { "id": "user", "type": "external", "label": "Người dùng", "sublabel": "Gen Z / 18+", "pos": [32, 300], "size": [130, 66] },
+    { "id": "mobile", "type": "frontend", "label": "Mobile Application", "sublabel": "Ứng dụng di động", "pos": [225, 300], "size": [175, 66], "tag": "Người dùng duyệt" },
+    { "id": "fastapi", "type": "backend", "label": "FastAPI Backend", "sublabel": "Python · API & nghiệp vụ", "brand": "fastapi", "pos": [490, 300], "size": [160, 66], "tag": "HTTPS API" },
+    { "id": "langchain", "type": "backend", "label": "Bộ điều phối LangChain", "sublabel": "Python · Điều phối tác vụ AI", "brand": "python", "pos": [710, 145], "size": [165, 66], "tag": "Image-to-Prompt" },
+    { "id": "postgres", "type": "database", "label": "PostgreSQL", "sublabel": "Tủ đồ · trạng thái · gu", "brand": "postgresql", "pos": [710, 320], "size": [165, 66], "tag": "SQL :5432" },
+    { "id": "rustfs", "type": "cloud", "label": "RustFS", "sublabel": "Ảnh nguồn · ảnh tạo", "pos": [710, 465], "size": [165, 66], "tag": "S3-compatible" },
+    { "id": "azure-openai", "type": "external", "label": "Azure OpenAI", "sublabel": "AI đa phương thức / LLM", "brand": "openai", "pos": [980, 145], "size": [165, 66], "tag": "Azure" },
+    { "id": "approval", "type": "security", "label": "Bước xác nhận", "sublabel": "Xem trước trước khi hoàn tất", "pos": [490, 465], "size": [160, 66], "tag": "Đồng ý của người dùng" }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "Ubuntu VM - môi trường MVP", "wraps": ["fastapi", "langchain", "postgres", "rustfs", "approval"], "pad": 30 }
+  ],
+  "connections": [
+    { "id": "user-mobile", "from": "user", "to": "mobile", "label": "tạo và duyệt lookbook", "variant": "emphasis", "labelDy": -34 },
+    { "id": "mobile-api", "from": "mobile", "to": "fastapi", "label": "HTTPS JSON + multipart", "variant": "emphasis", "labelDy": -34 },
+    { "id": "api-agent", "from": "fastapi", "to": "langchain", "label": "gọi tác vụ AI", "fromSide": "top", "toSide": "left" },
+    { "id": "agent-azure", "from": "langchain", "to": "azure-openai", "label": "Azure OpenAI API", "variant": "emphasis" },
+    { "id": "api-postgres", "from": "fastapi", "to": "postgres", "label": "SQL: thông tin & trạng thái", "fromSide": "right", "toSide": "left", "labelAt": [790, 262] },
+    { "id": "api-rustfs", "from": "fastapi", "to": "rustfs", "label": "S3: lưu / tải ảnh", "fromSide": "bottom", "toSide": "left" },
+    { "id": "api-approval", "from": "fastapi", "to": "approval", "label": "gửi bản xem trước", "variant": "security", "fromSide": "bottom", "toSide": "top", "labelAt": [445, 425] },
+    { "id": "approval-mobile", "from": "approval", "to": "mobile", "label": "chấp nhận / từ chối", "variant": "security", "fromSide": "left", "toSide": "bottom" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Luồng chính của sản phẩm", "items": ["Ảnh quần áo, dáng và bối cảnh được tách thành các phần có thể phối lại.", "Ứng dụng dùng chung một API cho catalogue, lookbook, chỉnh từng phần và swipe để học gu."] },
+    { "dot": "emerald", "title": "Dữ liệu được đặt đúng chỗ", "items": ["PostgreSQL lưu thông tin, trạng thái và tín hiệu về gu; không lưu tệp ảnh.", "RustFS lưu ảnh gốc, ảnh đã tách và ảnh lookbook tạo ra."] },
+    { "dot": "rose", "title": "Quyền riêng tư ngay từ đầu", "items": ["LangChain gọi Azure OpenAI để xử lý AI đa phương thức; backend quản lý dữ liệu của ứng dụng.", "Người dùng luôn xem trước và xác nhận thao tác nhạy cảm trước khi đăng kết quả."] }
+  ]
+}

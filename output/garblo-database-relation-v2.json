@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Garblo - Database Relation",
+    "output": "garblo-database-relation.html",
+    "quality_profile": "showcase",
+    "viewBox": [1380, 620],
+    "views": [
+      { "id": "assets-closet", "label": "Ảnh & tủ đồ", "focus": ["users", "assets", "rustfs", "garments"] },
+      { "id": "lookbook-chain", "label": "Chuỗi lookbook", "focus": ["assets", "garments", "lookbooks", "looks", "lookitems"] },
+      { "id": "ai-approval", "label": "AI & phê duyệt", "focus": ["users", "assets", "jobs", "approvals"] },
+      { "id": "style-social", "label": "Gu & kết nối", "focus": ["users", "looks", "signals", "matches"] }
+    ]
+  },
+  "boundaries": [
+    {
+      "label": "PostgreSQL · dữ liệu nghiệp vụ",
+      "kind": "region",
+      "wraps": ["users", "consents", "assets", "jobs", "garments", "approvals", "lookbooks", "looks", "lookitems", "signals", "matches"]
+    }
+  ],
+  "components": [
+    { "id": "users", "type": "database", "label": "users", "sublabel": "Hồ sơ & gu", "pos": [600, 180], "size": [150, 60] },
+    { "id": "consents", "type": "database", "label": "consent_records", "sublabel": "Quyền đồng ý", "pos": [360, 180], "size": [150, 60] },
+    { "id": "jobs", "type": "database", "label": "ai_jobs", "sublabel": "Tiến trình AI", "pos": [600, 60], "size": [150, 60] },
+    { "id": "approvals", "type": "database", "label": "approval_requests", "sublabel": "Chờ người dùng duyệt", "pos": [830, 60], "size": [170, 60] },
+    { "id": "assets", "type": "database", "label": "media_assets", "sublabel": "Metadata + object_key", "pos": [950, 180], "size": [165, 60] },
+    { "id": "rustfs", "type": "cloud", "label": "RustFS", "sublabel": "Tệp ảnh gốc / tạo", "pos": [1200, 180], "size": [165, 60] },
+    { "id": "lookbooks", "type": "database", "label": "lookbooks", "sublabel": "Bộ sưu tập phối đồ", "pos": [150, 340], "size": [155, 60] },
+    { "id": "looks", "type": "database", "label": "looks", "sublabel": "Một outfit / ảnh tạo", "pos": [480, 340], "size": [155, 60] },
+    { "id": "lookitems", "type": "database", "label": "look_items", "sublabel": "Món đồ trong outfit", "pos": [810, 340], "size": [155, 60] },
+    { "id": "garments", "type": "database", "label": "garments", "sublabel": "Món đồ trong tủ", "pos": [1050, 500], "size": [155, 60] },
+    { "id": "signals", "type": "database", "label": "style_signals", "sublabel": "Tín hiệu thích / bỏ qua", "pos": [480, 500], "size": [165, 60] },
+    { "id": "matches", "type": "database", "label": "taste_matches", "sublabel": "Người có gu tương đồng", "pos": [150, 500], "size": [175, 60] }
+  ],
+  "connections": [
+    { "from": "users", "to": "consents" },
+    { "from": "users", "to": "jobs" },
+    { "from": "jobs", "to": "approvals" },
+    { "from": "users", "to": "assets" },
+    { "from": "assets", "to": "rustfs", "label": "object_key" },
+    { "from": "assets", "to": "garments", "label": "source_asset_id", "fromSide": "bottom", "toSide": "top" },
+    { "from": "lookitems", "to": "garments", "label": "garment_id" },
+    { "from": "lookbooks", "to": "looks", "label": "lookbook_id" },
+    { "from": "looks", "to": "lookitems", "label": "look_id" },
+    { "from": "looks", "to": "signals", "label": "look_id", "fromSide": "bottom", "toSide": "top" },
+    { "from": "signals", "to": "matches", "label": "tính điểm gu" }
+  ],
+  "cards": []
+}

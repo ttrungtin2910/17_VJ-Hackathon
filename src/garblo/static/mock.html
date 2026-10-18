@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Garblo API Mock</title>
+  <style>
+    :root { color-scheme: dark; --bg:#09131f; --panel:#102235; --line:#274258; --text:#e8f2fa; --muted:#9bb2c6; --accent:#4ed2bf; --danger:#ff7d83; --warn:#f6ca6b; }
+    * { box-sizing:border-box; } body { margin:0; font:14px/1.45 Inter,ui-sans-serif,system-ui,sans-serif; background:var(--bg); color:var(--text); }
+    header { padding:24px max(20px,calc((100vw - 1180px)/2)); border-bottom:1px solid var(--line); background:#0d1b2a; display:flex; gap:20px; align-items:center; justify-content:space-between; }
+    h1 { margin:0; font-size:24px; } h2 { margin:0 0 12px; font-size:16px; } h3 { margin:0 0 8px; font-size:14px; } p { color:var(--muted); margin:0 0 12px; }
+    main { max-width:1180px; margin:0 auto; padding:20px; display:grid; grid-template-columns:minmax(0,2fr) minmax(300px,1fr); gap:18px; }
+    .stack { display:grid; gap:18px; } .card { border:1px solid var(--line); border-radius:12px; padding:16px; background:var(--panel); box-shadow:0 12px 28px #0002; }
+    form,.fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; } .full { grid-column:1/-1; }
+    label { display:grid; gap:5px; color:var(--muted); font-size:12px; } input,select,textarea,button { font:inherit; } input,select,textarea { width:100%; padding:9px 10px; border:1px solid var(--line); border-radius:7px; color:var(--text); background:#0a1827; }
+    textarea { min-height:68px; resize:vertical; } button { padding:9px 11px; border:0; border-radius:7px; cursor:pointer; font-weight:700; color:#06201d; background:var(--accent); } button.secondary { background:#24465d; color:var(--text); } button.danger { background:var(--danger); color:#300; } button:disabled { opacity:.5; cursor:not-allowed; }
+    .status { border-radius:999px; padding:5px 10px; font-size:12px; color:var(--muted); border:1px solid var(--line); } .status.ready { border-color:#2eaa99; color:var(--accent); }
+    .list { display:grid; gap:8px; } .row { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px; border:1px solid var(--line); border-radius:8px; background:#0c1a29; } .row small { color:var(--muted); display:block; }
+    .actions { display:flex; flex-wrap:wrap; gap:7px; } .actions button { font-size:12px; padding:6px 8px; } .check-list { max-height:190px; overflow:auto; border:1px solid var(--line); border-radius:7px; padding:8px; display:grid; gap:6px; } .check-list label { display:flex; align-items:center; gap:8px; font-size:13px; }
+    pre { margin:0; padding:12px; min-height:260px; max-height:650px; overflow:auto; white-space:pre-wrap; word-break:break-word; border-radius:8px; background:#06101a; color:#b9d4e8; font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace; }
+    .notice { border-left:3px solid var(--warn); padding:8px 10px; background:#33291455; color:#efd493; border-radius:4px; font-size:12px; } .error { color:var(--danger); }
+    @media (max-width:850px) { main { grid-template-columns:1fr; } header { align-items:flex-start; flex-direction:column; } } @media (max-width:560px) { form,.fields { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div><h1>Garblo API Mock</h1><p>Manual test console · same-origin <code>/v1</code></p></div>
+    <div id="auth-status" class="status">Chưa đăng nhập</div>
+  </header>
+  <main>
+    <section class="stack">
+      <article class="card">
+        <h2>1. Tài khoản</h2>
+        <div class="fields">
+          <form id="register-form"><h3 class="full">Đăng ký</h3><label>Email<input name="email" type="email" required></label><label>Tên hiển thị<input name="display_name" required></label><label class="full">Mật khẩu (≥12 ký tự)<input name="password" type="password" minlength="12" required></label><button class="full">Tạo tài khoản</button></form>
+          <form id="login-form"><h3 class="full">Đăng nhập</h3><label>Email<input name="email" type="email" required></label><label>Mật khẩu<input name="password" type="password" required></label><button class="full">Nhận access token</button><button class="full secondary" type="button" id="logout">Đăng xuất</button></form>
+        </div>
+      </article>
+
+      <article class="card">
+        <h2>2. Consent AI</h2>
+        <p>Phải có consent <code>ai_processing</code> trước khi chạy catalogue/lookbook.</p>
+        <form id="consent-form"><label>Mục đích<input name="purpose" value="ai_processing" required></label><label>Policy version<input name="policy_version" value="v1" required></label><button>Ghi consent</button></form>
+      </article>
+
+      <article class="card">
+        <h2>3. Upload và catalogue</h2>
+        <form id="upload-form"><label>Loại asset<select name="asset_type"><option value="garment_photo">garment_photo</option><option value="pose">pose</option><option value="background">background</option></select></label><label>Ảnh JPEG/PNG/WebP<input name="file" type="file" accept="image/jpeg,image/png,image/webp" required></label><button>Upload ảnh</button></form>
+        <div id="assets" class="list" style="margin-top:14px"></div>
+      </article>
+
+      <article class="card">
+        <h2>4. Tạo lookbook</h2>
+        <p class="notice">Azure chưa cấu hình sẽ trả 503 theo thiết kế. Sau khi Azure hoạt động, job được worker xử lý và kết quả chờ approval.</p>
+        <form id="lookbook-form"><label>Tiêu đề<input name="title" value="Weekend lookbook" required></label><label>Occasion<input name="occasion" value="Đi chơi cuối tuần"></label><label>Theme<input name="theme" value="Minimal streetwear"></label><label>Điều chỉnh thêm<input name="instruction" placeholder="Ví dụ: ưu tiên tông màu trung tính"></label><label class="full">Chọn garments <span id="garment-count"></span><span id="garments" class="check-list">Chưa có garment nào.</span></label><button class="full">Tạo AI lookbook</button></form>
+      </article>
+
+      <article class="card">
+        <h2>5. Theo dõi job</h2>
+        <form id="job-form"><label>Job ID<input id="job-id" name="job_id" placeholder="Tự điền sau khi tạo job" required></label><div class="actions"><button>Kiểm tra trạng thái</button><button class="secondary" type="button" id="poll-job">Poll mỗi 2 giây</button><button class="danger" type="button" id="stop-poll">Dừng poll</button></div></form>
+        <div id="job-result" class="notice" style="margin-top:12px">Chưa có job đang theo dõi.</div>
+      </article>
+
+      <article class="card">
+        <h2>6. Approval preview</h2>
+        <div class="actions"><button id="load-approvals">Tải approval pending</button><button class="secondary" id="load-lookbooks">Tải lookbooks</button></div>
+        <div id="approvals" class="list" style="margin-top:14px"></div>
+        <div id="lookbooks" class="list" style="margin-top:14px"></div>
+      </article>
+    </section>
+
+    <aside class="stack"><article class="card"><h2>Request / Response log</h2><p>Mọi lệnh API và status được ghi tại đây. Bearer token không được in vào log.</p><pre id="log">Sẵn sàng. Đăng ký hoặc đăng nhập để bắt đầu.</pre></article></aside>
+  </main>
+  <script>
+    const API = '/v1';
+    const logElement = document.querySelector('#log');
+    const authStatus = document.querySelector('#auth-status');
+    let token = sessionStorage.getItem('garblo.access_token') || '';
+    let pollTimer = null;
+
+    const log = (label, value) => { const stamp = new Date().toLocaleTimeString(); const body = typeof value === 'string' ? value : JSON.stringify(value, null, 2); logElement.textContent = `[${stamp}] ${label}\n${body}\n\n` + logElement.textContent; };
+    const updateAuth = () => { authStatus.textContent = token ? 'Đã đăng nhập · token trong session' : 'Chưa đăng nhập'; authStatus.classList.toggle('ready', Boolean(token)); };
+    const json = form => Object.fromEntries(new FormData(form).entries());
+    async function request(path, options = {}) {
+      const headers = new Headers(options.headers || {});
+      if (token) headers.set('Authorization', `Bearer ${token}`);
+      if (options.body && !(options.body instanceof FormData)) headers.set('Content-Type', 'application/json');
+      const response = await fetch(API + path, {...options, headers});
+      const text = await response.text(); let payload = null;
+      try { payload = text ? JSON.parse(text) : null; } catch { payload = text; }
+      log(`${options.method || 'GET'} ${path} → ${response.status}`, payload || '(empty)');
+      if (!response.ok) throw new Error(typeof payload === 'object' && payload?.detail ? payload.detail : `HTTP ${response.status}`);
+      return payload;
+    }
+    const requireLogin = () => { if (!token) throw new Error('Hãy đăng nhập trước.'); };
+    const message = (element, text, error = false) => { element.textContent = text; element.classList.toggle('error', error); };
+
+    document.querySelector('#register-form').addEventListener('submit', async event => { event.preventDefault(); try { await request('/auth/register', {method:'POST', body:JSON.stringify(json(event.currentTarget))}); log('Đăng ký', 'Thành công; hãy đăng nhập.'); } catch (error) { log('Lỗi đăng ký', error.message); } });
+    document.querySelector('#login-form').addEventListener('submit', async event => { event.preventDefault(); try { const result = await request('/auth/login', {method:'POST', body:JSON.stringify(json(event.currentTarget))}); token = result.access_token; sessionStorage.setItem('garblo.access_token', token); updateAuth(); await refreshData(); } catch (error) { log('Lỗi đăng nhập', error.message); } });
+    document.querySelector('#logout').addEventListener('click', () => { token=''; sessionStorage.removeItem('garblo.access_token'); updateAuth(); });
+    document.querySelector('#consent-form').addEventListener('submit', async event => { event.preventDefault(); try { requireLogin(); await request('/consents', {method:'POST', body:JSON.stringify(json(event.currentTarget))}); } catch (error) { log('Lỗi consent', error.message); } });
+    document.querySelector('#upload-form').addEventListener('submit', async event => { event.preventDefault(); try { requireLogin(); await request('/assets', {method:'POST', body:new FormData(event.currentTarget)}); event.currentTarget.reset(); await loadAssets(); } catch (error) { log('Lỗi upload', error.message); } });
+    document.querySelector('#lookbook-form').addEventListener('submit', async event => { event.preventDefault(); try { requireLogin(); const values = json(event.currentTarget); values.garment_ids = [...document.querySelectorAll('[name="garment_ids"]:checked')].map(input => input.value); const result = await request('/lookbooks', {method:'POST', body:JSON.stringify(values)}); document.querySelector('#job-id').value = result.job_id; await inspectJob(result.job_id); } catch (error) { log('Lỗi tạo lookbook', error.message); } });
+    document.querySelector('#job-form').addEventListener('submit', async event => { event.preventDefault(); try { requireLogin(); await inspectJob(document.querySelector('#job-id').value); } catch (error) { log('Lỗi tải job', error.message); } });
+    document.querySelector('#poll-job').addEventListener('click', () => { const id = document.querySelector('#job-id').value; if (!id) return log('Poll job', 'Nhập job ID trước.'); clearInterval(pollTimer); pollTimer = setInterval(() => inspectJob(id).catch(error => log('Lỗi poll', error.message)), 2000); log('Poll job', `Bắt đầu poll ${id}`); });
+    document.querySelector('#stop-poll').addEventListener('click', () => { clearInterval(pollTimer); pollTimer=null; log('Poll job', 'Đã dừng.'); });
+    document.querySelector('#load-approvals').addEventListener('click', () => loadApprovals().catch(error => log('Lỗi approval', error.message)));
+    document.querySelector('#load-lookbooks').addEventListener('click', () => loadLookbooks().catch(error => log('Lỗi lookbooks', error.message)));
+
+    async function loadAssets() { requireLogin(); const assets = await request('/assets'); const container = document.querySelector('#assets'); container.innerHTML = assets.length ? '' : '<p>Chưa có asset.</p>'; assets.forEach(asset => { const row = document.createElement('div'); row.className='row'; row.innerHTML = `<div><strong>${asset.asset_type}</strong><small>${asset.id} · ${asset.status} · ${(asset.byte_size/1024).toFixed(1)} KB</small></div><div class="actions"><button class="secondary">Mở ảnh</button><button>Catalogue</button></div>`; const [view, catalogue] = row.querySelectorAll('button'); view.onclick = () => viewAsset(asset.id); catalogue.onclick = () => startCatalogue(asset.id); container.append(row); }); }
+    async function loadGarments() { requireLogin(); const garments = await request('/garments'); const container = document.querySelector('#garments'); document.querySelector('#garment-count').textContent = `(${garments.length})`; container.innerHTML = garments.length ? '' : 'Chưa có garment. Chạy catalogue cho ảnh quần áo trước.'; garments.forEach(garment => { const label = document.createElement('label'); label.innerHTML = `<input name="garment_ids" type="checkbox" value="${garment.id}"><span><strong>${garment.category || 'unknown garment'}</strong> · ${garment.color || 'unknown color'}<small>${garment.id}</small></span>`; container.append(label); }); }
+    async function viewAsset(assetId) { try { requireLogin(); const result = await request(`/assets/${assetId}/download`); window.open(result.url, '_blank', 'noopener'); } catch (error) { log('Lỗi mở asset', error.message); } }
+    async function startCatalogue(assetId) { try { requireLogin(); const result = await request(`/assets/${assetId}/catalogize`, {method:'POST'}); document.querySelector('#job-id').value=result.job_id; await inspectJob(result.job_id); } catch (error) { log('Lỗi catalogue', error.message); } }
+    async function inspectJob(jobId) { const job = await request(`/jobs/${jobId}`); message(document.querySelector('#job-result'), `${job.status} · ${job.job_type}\n${JSON.stringify(job.output_ref)}${job.error_message ? '\n' + job.error_message : ''}`, job.status === 'failed'); if (['succeeded','failed'].includes(job.status)) { clearInterval(pollTimer); if (job.status === 'succeeded') { await Promise.all([loadGarments(), loadApprovals(), loadLookbooks()]); } } return job; }
+    async function loadApprovals() { requireLogin(); const approvals = await request('/approvals?approval_status=pending'); const container = document.querySelector('#approvals'); container.innerHTML = approvals.length ? '' : '<p>Không có approval pending.</p>'; approvals.forEach(approval => { const row = document.createElement('div'); row.className='row'; row.innerHTML = `<div><strong>${approval.action}</strong><small>${approval.subject_type} · ${approval.subject_id}</small></div><div class="actions"><button>Accept</button><button class="danger">Reject</button></div>`; const [accept,reject]=row.querySelectorAll('button'); accept.onclick=()=>decideApproval(approval.id,'accepted'); reject.onclick=()=>decideApproval(approval.id,'rejected'); container.append(row); }); }
+    async function decideApproval(id, decision) { try { await request(`/approvals/${id}/decision`, {method:'POST', body:JSON.stringify({decision})}); await Promise.all([loadApprovals(),loadLookbooks()]); } catch (error) { log('Lỗi approval decision', error.message); } }
+    async function loadLookbooks() { requireLogin(); const lookbooks = await request('/lookbooks'); const container = document.querySelector('#lookbooks'); container.innerHTML = lookbooks.length ? '' : '<p>Chưa có lookbook.</p>'; lookbooks.forEach(book => { const row=document.createElement('div'); row.className='row'; row.innerHTML=`<div><strong>${book.title}</strong><small>${book.status} · ${book.id}</small></div><div class="actions"><button class="secondary">Xem looks</button></div>`; row.querySelector('button').onclick=()=>loadLooks(book.id); container.append(row); }); }
+    async function loadLooks(lookbookId) { try { const looks = await request(`/lookbooks/${lookbookId}/looks`); log(`Looks for ${lookbookId}`, looks); for (const look of looks) { if (look.generated_asset_id) await viewAsset(look.generated_asset_id); } } catch (error) { log('Lỗi tải looks', error.message); } }
+    async function refreshData() { try { await Promise.all([loadAssets(),loadGarments(),loadApprovals(),loadLookbooks()]); } catch (error) { log('Lỗi khởi tạo dữ liệu', error.message); } }
+    updateAuth(); if (token) refreshData();
+  </script>
+</body>
+</html>
