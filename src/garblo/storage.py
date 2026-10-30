@@ -26,13 +26,27 @@ class ObjectStorage:
         if not settings.storage_is_configured:
             raise StorageUnavailable("RustFS/S3 configuration is incomplete")
         self.settings = settings
-        self._client = boto3.client(
+        self._client = self._make_client(settings.s3_endpoint_url)
+        self._presign_client = (
+            self._make_client(settings.s3_public_endpoint_url)
+            if settings.s3_public_endpoint_url
+            else self._client
+        )
+
+    def _make_client(self, endpoint_url: str):
+        settings = self.settings
+        return boto3.client(
             "s3",
-            endpoint_url=settings.s3_endpoint_url,
+            endpoint_url=endpoint_url,
             aws_access_key_id=settings.s3_access_key,
             aws_secret_access_key=settings.s3_secret_key,
             region_name=settings.s3_region,
-            config=Config(signature_version="s3v4"),
+            config=Config(
+                signature_version="s3v4",
+                connect_timeout=10,
+                read_timeout=60,
+                retries={"total_max_attempts": 2},
+            ),
         )
 
     @property
@@ -45,13 +59,20 @@ class ObjectStorage:
 
     def get_bytes(self, key: str) -> bytes:
         response = self._client.get_object(Bucket=self.bucket, Key=key)
-        return response["Body"].read()
+        stream = response["Body"]
+        try:
+            body = stream.read(self.settings.max_upload_bytes + 1)
+        finally:
+            stream.close()
+        if len(body) > self.settings.max_upload_bytes:
+            raise ValueError("Object vượt giới hạn ảnh")
+        return body
 
     def delete(self, key: str) -> None:
         self._client.delete_object(Bucket=self.bucket, Key=key)
 
     def presign_get(self, key: str) -> str:
-        return self._client.generate_presigned_url(
+        return self._presign_client.generate_presigned_url(
             "get_object",
             Params={"Bucket": self.bucket, "Key": key},
             ExpiresIn=self.settings.s3_presign_seconds,
@@ -59,7 +80,8 @@ class ObjectStorage:
 
 
 def storage_key(user_id: str, asset_id: str, filename: str) -> str:
-    safe_name = "".join(char for char in filename.lower() if char.isalnum() or char in {".", "-", "_"})
+    safe_name = "".join(
+        char for char in filename.lower() if char.isalnum() or char in {".", "-", "_"}
+    )
     suffix = safe_name.rsplit(".", 1)[-1] if "." in safe_name else "bin"
     return f"users/{user_id}/assets/{asset_id}.{suffix}"
-

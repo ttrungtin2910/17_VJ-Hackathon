@@ -3,13 +3,12 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+import garblo.models  # noqa: F401  -- register metadata before Alembic inspects it.
 from garblo.config import get_settings
 from garblo.database import Base
-import garblo.models  # noqa: F401  -- register metadata before Alembic inspects it.
-
 
 config = context.config
-config.set_main_option("sqlalchemy.url", get_settings().database_url)
+config.set_main_option("sqlalchemy.url", get_settings().database_url.replace("%", "%%"))
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
@@ -29,7 +28,9 @@ def run_migrations_offline() -> None:
 
 def run_migrations_online() -> None:
     connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}), prefix="sqlalchemy.", poolclass=pool.NullPool
+        config.get_section(config.config_ini_section, {}),
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:
         context.configure(connection=connection, target_metadata=target_metadata)
@@ -41,4 +42,3 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
-

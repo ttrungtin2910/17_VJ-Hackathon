@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+
+from garblo.ai_providers.contracts import GarmentAttributes, ShortText
 
 
 class APIModel(BaseModel):
@@ -69,8 +71,47 @@ class GarmentPatch(BaseModel):
     color: str | None = Field(default=None, max_length=80)
     material: str | None = Field(default=None, max_length=80)
     season: str | None = Field(default=None, max_length=80)
-    tags: list[str] | None = None
+    tags: list[ShortText] = Field(default_factory=list, max_length=20)
     catalog_status: str | None = Field(default=None, max_length=40)
+
+    @field_validator("catalog_status")
+    @classmethod
+    def valid_status(cls, value):
+        if value not in {"active", "archived"}:
+            raise ValueError("catalog_status phải là active hoặc archived")
+        return value
+
+
+class CatalogueRequest(BaseModel):
+    vlm_provider: Literal["openai", "fpt"] = "openai"
+
+
+class CandidatePatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    category: str | None = Field(default=None, max_length=80, min_length=1)
+    color: str | None = Field(default=None, max_length=80, min_length=1)
+    material: str | None = Field(default=None, max_length=80, min_length=1)
+    season: str | None = Field(default=None, max_length=80, min_length=1)
+    tags: list[ShortText] = Field(default_factory=list, max_length=20)
+
+
+class CandidateResponse(APIModel):
+    id: str
+    asset_id: str
+    job_id: str
+    status: str
+    attributes: GarmentAttributes = Field(validation_alias="attributes_json")
+    garment_id: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CommitCandidatesRequest(BaseModel):
+    candidate_ids: list[str] = Field(min_length=1, max_length=20)
+
+
+class CommitCandidatesResponse(BaseModel):
+    garment_ids: list[str]
 
 
 class GarmentResponse(APIModel):
@@ -94,6 +135,7 @@ class LookbookCreateRequest(BaseModel):
     pose_asset_id: str | None = None
     background_asset_id: str | None = None
     instruction: str | None = Field(default=None, max_length=1000)
+    preset_id: str | None = Field(default=None, max_length=80)
 
 
 class LookbookResponse(APIModel):
@@ -113,6 +155,8 @@ class LookResponse(APIModel):
     model_reference: str | None
     status: str
     created_at: datetime
+    garment_ids: list[str] = Field(default_factory=list)
+    approval_id: str | None = None
 
 
 class JobResponse(APIModel):
@@ -124,6 +168,10 @@ class JobResponse(APIModel):
     error_message: str | None
     created_at: datetime
     completed_at: datetime | None
+    model_provider: str
+    model: str | None = None
+    attempts: int
+    next_attempt_at: datetime | None
 
 
 class JobCreatedResponse(BaseModel):
@@ -149,3 +197,12 @@ class ApprovalResponse(APIModel):
     requested_at: datetime
     decided_at: datetime | None
 
+
+class LookFeedbackRequest(BaseModel):
+    signal: Literal["like", "dislike"]
+
+
+class LookFeedbackResponse(APIModel):
+    id: str
+    look_id: str
+    signal: str

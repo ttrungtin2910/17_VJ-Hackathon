@@ -4,19 +4,53 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
-from sqlalchemy import select
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+    status,
+)
+from sqlalchemy import cast, func, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
+from garblo.ai import AIProviderError
 from garblo.config import Settings, get_settings
+from garblo.consent import active_ai_consent
 from garblo.database import get_db
 from garblo.dependencies import get_current_user, require_ai_configuration
-from garblo.models import ApprovalRequest, AiJob, ConsentRecord, Garment, Look, LookItem, Lookbook, MediaAsset, User, new_id
+from garblo.images import sanitize_image
+from garblo.jobs import ensure_job_configuration, new_snapshot
+from garblo.models import (
+    AiJob,
+    ApprovalRequest,
+    ConsentRecord,
+    Garment,
+    GarmentCandidate,
+    Look,
+    Lookbook,
+    LookItem,
+    MediaAsset,
+    StyleSignal,
+    User,
+    new_id,
+)
+from garblo.presets import PRESETS, select_preset
 from garblo.schemas import (
     ApprovalDecisionRequest,
     ApprovalResponse,
     AssetDownloadResponse,
     AssetResponse,
+    CandidatePatch,
+    CandidateResponse,
+    CatalogueRequest,
+    CommitCandidatesRequest,
+    CommitCandidatesResponse,
     ConsentRequest,
     ConsentResponse,
     GarmentPatch,
@@ -24,9 +58,11 @@ from garblo.schemas import (
     JobCreatedResponse,
     JobResponse,
     LoginRequest,
-    LookResponse,
     LookbookCreateRequest,
     LookbookResponse,
+    LookFeedbackRequest,
+    LookFeedbackResponse,
+    LookResponse,
     RegisterRequest,
     TokenResponse,
     UserResponse,
@@ -34,7 +70,6 @@ from garblo.schemas import (
 )
 from garblo.security import create_access_token, hash_password, verify_password
 from garblo.storage import ObjectStorage, StorageUnavailable, storage_key
-
 
 router = APIRouter()
 DB = Annotated[Session, Depends(get_db)]
@@ -54,15 +89,8 @@ def storage_or_503(settings: Settings) -> ObjectStorage:
         raise HTTPException(status_code=503, detail="Object storage is not configured") from exc
 
 
-def active_ai_consent(db: Session, user_id: str) -> bool:
-    statement = (
-        select(ConsentRecord)
-        .where(ConsentRecord.user_id == user_id, ConsentRecord.purpose == "ai_processing")
-        .order_by(ConsentRecord.granted_at.desc())
-        .limit(1)
-    )
-    consent = db.execute(statement).scalar_one_or_none()
-    return bool(consent and consent.revoked_at is None)
+def provider_http_error(exc: AIProviderError) -> HTTPException:
+    return HTTPException(status_code=503, detail={"code": exc.code, "message": str(exc)})
 
 
 def require_ai_consent(db: Session, user: User) -> None:
@@ -74,14 +102,18 @@ def require_ai_consent(db: Session, user: User) -> None:
 
 
 def get_owned_asset_or_404(db: Session, user_id: str, asset_id: str) -> MediaAsset:
-    asset = db.scalar(select(MediaAsset).where(MediaAsset.id == asset_id, MediaAsset.user_id == user_id))
+    asset = db.scalar(
+        select(MediaAsset).where(MediaAsset.id == asset_id, MediaAsset.user_id == user_id)
+    )
     if not asset:
         raise HTTPException(status_code=404, detail="Asset not found")
     return asset
 
 
 def get_owned_lookbook_or_404(db: Session, user_id: str, lookbook_id: str) -> Lookbook:
-    lookbook = db.scalar(select(Lookbook).where(Lookbook.id == lookbook_id, Lookbook.user_id == user_id))
+    lookbook = db.scalar(
+        select(Lookbook).where(Lookbook.id == lookbook_id, Lookbook.user_id == user_id)
+    )
     if not lookbook:
         raise HTTPException(status_code=404, detail="Lookbook not found")
     return lookbook
@@ -92,7 +124,11 @@ def register(payload: RegisterRequest, db: DB) -> User:
     email = payload.email.lower()
     if db.scalar(select(User).where(User.email == email)):
         raise HTTPException(status_code=409, detail="Email is already registered")
-    user = User(email=email, display_name=payload.display_name.strip(), password_hash=hash_password(payload.password))
+    user = User(
+        email=email,
+        display_name=payload.display_name.strip(),
+        password_hash=hash_password(payload.password),
+    )
     db.add(user)
     db.commit()
     db.refresh(user)
@@ -100,7 +136,9 @@ def register(payload: RegisterRequest, db: DB) -> User:
 
 
 @router.post("/auth/login", response_model=TokenResponse)
-def login(payload: LoginRequest, db: DB, settings: Settings = Depends(get_settings)) -> TokenResponse:
+def login(
+    payload: LoginRequest, db: DB, settings: Settings = Depends(get_settings)
+) -> TokenResponse:
     user = db.scalar(select(User).where(User.email == payload.email.lower()))
     if not user or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Incorrect email or password")
@@ -115,7 +153,9 @@ def current_profile(user: CurrentUser) -> User:
 
 @router.post("/consents", response_model=ConsentResponse, status_code=status.HTTP_201_CREATED)
 def grant_consent(payload: ConsentRequest, db: DB, user: CurrentUser) -> ConsentRecord:
-    consent = ConsentRecord(user_id=user.id, purpose=payload.purpose, policy_version=payload.policy_version)
+    consent = ConsentRecord(
+        user_id=user.id, purpose=payload.purpose, policy_version=payload.policy_version
+    )
     db.add(consent)
     db.commit()
     db.refresh(consent)
@@ -125,7 +165,9 @@ def grant_consent(payload: ConsentRequest, db: DB, user: CurrentUser) -> Consent
 @router.delete("/consents/{consent_id}", status_code=status.HTTP_204_NO_CONTENT)
 def revoke_consent(consent_id: str, db: DB, user: CurrentUser) -> Response:
     consent = db.scalar(
-        select(ConsentRecord).where(ConsentRecord.id == consent_id, ConsentRecord.user_id == user.id)
+        select(ConsentRecord).where(
+            ConsentRecord.id == consent_id, ConsentRecord.user_id == user.id
+        )
     )
     if not consent:
         raise HTTPException(status_code=404, detail="Consent record not found")
@@ -136,35 +178,39 @@ def revoke_consent(consent_id: str, db: DB, user: CurrentUser) -> Response:
 
 
 @router.post("/assets", response_model=AssetResponse, status_code=status.HTTP_201_CREATED)
-async def upload_asset(
+def upload_asset(
     db: DB,
     user: CurrentUser,
     file: UploadFile = File(...),
     asset_type: str = Form("garment_photo"),
     settings: Settings = Depends(get_settings),
 ) -> MediaAsset:
-    if file.content_type not in IMAGE_MIME_TYPES:
-        raise HTTPException(status_code=415, detail="Only JPEG, PNG and WebP images are accepted")
-    body = await file.read(settings.max_upload_bytes + 1)
+    # Decode ảnh, S3 và SQLAlchemy đều sync: để FastAPI chạy route trong threadpool.
+    body = file.file.read(settings.max_upload_bytes + 1)
     if not body:
         raise HTTPException(status_code=422, detail="Uploaded file is empty")
     if len(body) > settings.max_upload_bytes:
         raise HTTPException(status_code=413, detail="Uploaded file exceeds the size limit")
+    try:
+        body, mime_type = sanitize_image(body, settings.max_upload_bytes, settings.max_image_pixels)
+    except ValueError as exc:
+        raise HTTPException(status_code=415, detail=str(exc)) from exc
     asset_id = new_id()
-    object_key = storage_key(user.id, asset_id, file.filename or "upload.bin")
+    extension = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[mime_type]
+    object_key = storage_key(user.id, asset_id, f"upload.{extension}")
     asset = MediaAsset(
         id=asset_id,
         user_id=user.id,
         object_key=object_key,
         asset_type=asset_type[:40],
-        mime_type=file.content_type,
+        mime_type=mime_type,
         checksum=hashlib.sha256(body).hexdigest(),
         byte_size=len(body),
         status="uploaded",
     )
     storage = storage_or_503(settings)
     try:
-        storage.put_bytes(object_key, body, file.content_type)
+        storage.put_bytes(object_key, body, mime_type)
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Object storage is unavailable") from exc
     db.add(asset)
@@ -175,11 +221,19 @@ async def upload_asset(
 
 @router.get("/assets", response_model=list[AssetResponse])
 def list_assets(db: DB, user: CurrentUser) -> list[MediaAsset]:
-    return list(db.scalars(select(MediaAsset).where(MediaAsset.user_id == user.id).order_by(MediaAsset.created_at.desc())))
+    return list(
+        db.scalars(
+            select(MediaAsset)
+            .where(MediaAsset.user_id == user.id)
+            .order_by(MediaAsset.created_at.desc())
+        )
+    )
 
 
 @router.get("/assets/{asset_id}/download", response_model=AssetDownloadResponse)
-def get_asset_download(asset_id: str, db: DB, user: CurrentUser, settings: Settings = Depends(get_settings)) -> AssetDownloadResponse:
+def get_asset_download(
+    asset_id: str, db: DB, user: CurrentUser, settings: Settings = Depends(get_settings)
+) -> AssetDownloadResponse:
     asset = get_owned_asset_or_404(db, user.id, asset_id)
     try:
         url = storage_or_503(settings).presign_get(asset.object_key)
@@ -188,24 +242,148 @@ def get_asset_download(asset_id: str, db: DB, user: CurrentUser, settings: Setti
     return AssetDownloadResponse(url=url, expires_in_seconds=settings.s3_presign_seconds)
 
 
-@router.post("/assets/{asset_id}/catalogize", response_model=JobCreatedResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/assets/{asset_id}/catalogize",
+    response_model=JobCreatedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def catalogize_asset(
     asset_id: str,
     db: DB,
     user: CurrentUser,
-    _: Settings = Depends(require_ai_configuration),
+    payload: CatalogueRequest | None = None,
+    settings: Settings = Depends(get_settings),
 ) -> JobCreatedResponse:
     require_ai_consent(db, user)
-    get_owned_asset_or_404(db, user.id, asset_id)
-    job = AiJob(user_id=user.id, job_type="catalogue", input_ref={"asset_id": asset_id})
+    asset = db.scalar(
+        select(MediaAsset)
+        .where(MediaAsset.id == asset_id, MediaAsset.user_id == user.id)
+        .with_for_update()
+    )
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    provider = (payload or CatalogueRequest()).vlm_provider
+    try:
+        snapshot = new_snapshot(settings, provider, "catalogue")
+    except AIProviderError as exc:
+        raise provider_http_error(exc) from exc
+    if asset.asset_type != "garment_photo":
+        raise HTTPException(status_code=422, detail="Chỉ phân tích garment_photo")
+    if asset.status != "uploaded":
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "analysis_already_exists", "message": "Dùng job/candidates hiện có"},
+        )
+    asset.status = "analyzing"
+    job = AiJob(
+        user_id=user.id,
+        job_type="catalogue",
+        model_provider=provider,
+        input_ref={"asset_id": asset_id, **snapshot},
+    )
     db.add(job)
     db.commit()
     return JobCreatedResponse(job_id=job.id)
 
 
+@router.get("/assets/{asset_id}/candidates", response_model=list[CandidateResponse])
+def list_candidates(asset_id: str, db: DB, user: CurrentUser):
+    get_owned_asset_or_404(db, user.id, asset_id)
+    return list(
+        db.scalars(
+            select(GarmentCandidate)
+            .where(GarmentCandidate.asset_id == asset_id, GarmentCandidate.user_id == user.id)
+            .order_by(GarmentCandidate.created_at, GarmentCandidate.candidate_index)
+        )
+    )
+
+
+@router.patch("/candidates/{candidate_id}", response_model=CandidateResponse)
+def patch_candidate(candidate_id: str, payload: CandidatePatch, db: DB, user: CurrentUser):
+    candidate = db.scalar(
+        select(GarmentCandidate)
+        .where(GarmentCandidate.id == candidate_id, GarmentCandidate.user_id == user.id)
+        .with_for_update()
+    )
+    if not candidate:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    if candidate.status != "draft":
+        raise HTTPException(status_code=409, detail="Candidate đã commit; sửa garment thay thế")
+    candidate.attributes_json = {
+        **candidate.attributes_json,
+        **payload.model_dump(exclude_unset=True),
+    }
+    db.commit()
+    db.refresh(candidate)
+    return candidate
+
+
+@router.post("/assets/{asset_id}/commit", response_model=CommitCandidatesResponse)
+def commit_candidates(asset_id: str, payload: CommitCandidatesRequest, db: DB, user: CurrentUser):
+    asset = db.scalar(
+        select(MediaAsset)
+        .where(MediaAsset.id == asset_id, MediaAsset.user_id == user.id)
+        .with_for_update()
+    )
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    ids = list(dict.fromkeys(payload.candidate_ids))
+    candidates = list(
+        db.scalars(
+            select(GarmentCandidate)
+            .where(
+                GarmentCandidate.id.in_(ids),
+                GarmentCandidate.asset_id == asset_id,
+                GarmentCandidate.user_id == user.id,
+            )
+            .order_by(GarmentCandidate.id)
+            .with_for_update()
+        )
+    )
+    if len(candidates) != len(ids):
+        raise HTTPException(status_code=404, detail="Candidate not found for this asset")
+    for candidate in candidates:
+        if candidate.status == "committed" and candidate.garment_id:
+            continue
+        if candidate.status != "draft":
+            raise HTTPException(status_code=409, detail="Candidate không thể commit")
+        garment = Garment(user_id=user.id, source_asset_id=asset_id, **candidate.attributes_json)
+        db.add(garment)
+        db.flush()
+        candidate.garment_id, candidate.status = garment.id, "committed"
+    asset.status = "catalogued"
+    by_id = {candidate.id: candidate.garment_id for candidate in candidates}
+    db.commit()
+    return CommitCandidatesResponse(garment_ids=[by_id[candidate_id] for candidate_id in ids])
+
+
 @router.get("/garments", response_model=list[GarmentResponse])
-def list_garments(db: DB, user: CurrentUser) -> list[Garment]:
-    return list(db.scalars(select(Garment).where(Garment.user_id == user.id).order_by(Garment.created_at.desc())))
+def list_garments(
+    db: DB,
+    user: CurrentUser,
+    category: str | None = None,
+    tags: Annotated[list[str] | None, Query()] = None,
+) -> list[Garment]:
+    statement = select(Garment).where(Garment.user_id == user.id)
+    if category:
+        statement = statement.where(Garment.category == category)
+    for index, tag in enumerate(tags or []):
+        if db.get_bind().dialect.name == "postgresql":
+            statement = statement.where(cast(Garment.tags, JSONB).contains([tag]))
+        else:
+            values = func.json_each(Garment.tags).table_valued("value").alias(f"tag_{index}")
+            statement = statement.where(
+                select(1).select_from(values).where(values.c.value == tag).exists()
+            )
+    return list(db.scalars(statement.order_by(Garment.created_at.desc())))
+
+
+@router.get("/garments/{garment_id}", response_model=GarmentResponse)
+def get_garment(garment_id: str, db: DB, user: CurrentUser):
+    garment = db.scalar(select(Garment).where(Garment.id == garment_id, Garment.user_id == user.id))
+    if not garment:
+        raise HTTPException(status_code=404, detail="Garment not found")
+    return garment
 
 
 @router.patch("/garments/{garment_id}", response_model=GarmentResponse)
@@ -225,23 +403,32 @@ def create_lookbook(
     payload: LookbookCreateRequest,
     db: DB,
     user: CurrentUser,
-    _: Settings = Depends(require_ai_configuration),
+    settings: Settings = Depends(require_ai_configuration),
 ) -> JobCreatedResponse:
     require_ai_consent(db, user)
+    try:
+        preset_id = select_preset(payload)
+        snapshot = new_snapshot(settings, "openai", "lookbook")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except AIProviderError as exc:
+        raise provider_http_error(exc) from exc
     garment_ids = list(dict.fromkeys(payload.garment_ids))
     garments = list(
         db.scalars(select(Garment).where(Garment.user_id == user.id, Garment.id.in_(garment_ids)))
     )
     if len(garments) != len(garment_ids):
-        raise HTTPException(status_code=422, detail="Every selected garment must belong to the current user")
+        raise HTTPException(
+            status_code=422, detail="Every selected garment must belong to the current user"
+        )
     for optional_asset in (payload.pose_asset_id, payload.background_asset_id):
         if optional_asset:
             get_owned_asset_or_404(db, user.id, optional_asset)
     lookbook = Lookbook(
         user_id=user.id,
         title=payload.title,
-        theme=payload.theme,
-        occasion=payload.occasion,
+        theme=preset_id,
+        occasion=preset_id,
         status="generating",
     )
     db.add(lookbook)
@@ -249,12 +436,15 @@ def create_lookbook(
     job = AiJob(
         user_id=user.id,
         job_type="lookbook",
+        model_provider="openai",
         input_ref={
+            **snapshot,
             "lookbook_id": lookbook.id,
             "garment_ids": garment_ids,
             "pose_asset_id": payload.pose_asset_id,
             "background_asset_id": payload.background_asset_id,
-            "instruction": payload.instruction,
+            "preset_id": preset_id,
+            "instruction": PRESETS[preset_id],
         },
     )
     db.add(job)
@@ -264,16 +454,50 @@ def create_lookbook(
 
 @router.get("/lookbooks", response_model=list[LookbookResponse])
 def list_lookbooks(db: DB, user: CurrentUser) -> list[Lookbook]:
-    return list(db.scalars(select(Lookbook).where(Lookbook.user_id == user.id).order_by(Lookbook.created_at.desc())))
+    return list(
+        db.scalars(
+            select(Lookbook).where(Lookbook.user_id == user.id).order_by(Lookbook.created_at.desc())
+        )
+    )
 
 
 @router.get("/lookbooks/{lookbook_id}/looks", response_model=list[LookResponse])
-def list_looks(lookbook_id: str, db: DB, user: CurrentUser) -> list[Look]:
+def list_looks(lookbook_id: str, db: DB, user: CurrentUser) -> list[LookResponse]:
     get_owned_lookbook_or_404(db, user.id, lookbook_id)
-    return list(db.scalars(select(Look).where(Look.lookbook_id == lookbook_id).order_by(Look.created_at.desc())))
+    looks = list(
+        db.scalars(
+            select(Look).where(Look.lookbook_id == lookbook_id).order_by(Look.created_at.desc())
+        )
+    )
+    ids = [look.id for look in looks]
+    items = list(
+        db.scalars(select(LookItem).where(LookItem.look_id.in_(ids)).order_by(LookItem.layer_order))
+    )
+    approvals = list(
+        db.scalars(
+            select(ApprovalRequest).where(
+                ApprovalRequest.subject_type == "look",
+                ApprovalRequest.subject_id.in_(ids),
+                ApprovalRequest.user_id == user.id,
+            )
+        )
+    )
+    return [
+        LookResponse.model_validate(look).model_copy(
+            update={
+                "garment_ids": [item.garment_id for item in items if item.look_id == look.id],
+                "approval_id": next((a.id for a in approvals if a.subject_id == look.id), None),
+            }
+        )
+        for look in looks
+    ]
 
 
-@router.post("/looks/{look_id}/variations", response_model=JobCreatedResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/looks/{look_id}/variations",
+    response_model=JobCreatedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 def create_variation(
     look_id: str,
     payload: VariationRequest,
@@ -287,49 +511,66 @@ def create_variation(
     )
     if not look:
         raise HTTPException(status_code=404, detail="Look not found")
-    garment_ids = list(db.scalars(select(LookItem.garment_id).where(LookItem.look_id == look.id)))
-    job = AiJob(
-        user_id=user.id,
-        job_type="variation",
-        input_ref={"lookbook_id": look.lookbook_id, "garment_ids": garment_ids, "instruction": payload.instruction},
-    )
-    db.add(job)
-    db.commit()
-    return JobCreatedResponse(job_id=job.id)
+    # Route được giữ để client nhận lỗi nghiệp vụ rõ thay vì âm thầm bỏ instruction.
+    raise HTTPException(status_code=422, detail="P0 tạm khóa chỉnh look bằng prompt tự do")
 
 
 @router.get("/jobs/{job_id}", response_model=JobResponse)
-def get_job(job_id: str, db: DB, user: CurrentUser) -> AiJob:
+def get_job(job_id: str, db: DB, user: CurrentUser) -> JobResponse:
     job = db.scalar(select(AiJob).where(AiJob.id == job_id, AiJob.user_id == user.id))
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return job
+    return JobResponse.model_validate(job).model_copy(update={"model": job.input_ref.get("model")})
 
 
-@router.post("/jobs/{job_id}/retry", response_model=JobCreatedResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/jobs/{job_id}/retry", response_model=JobCreatedResponse, status_code=status.HTTP_202_ACCEPTED
+)
 def retry_job(
     job_id: str,
     db: DB,
     user: CurrentUser,
-    _: Settings = Depends(require_ai_configuration),
+    settings: Settings = Depends(get_settings),
 ) -> JobCreatedResponse:
     require_ai_consent(db, user)
-    job = db.scalar(select(AiJob).where(AiJob.id == job_id, AiJob.user_id == user.id))
+    job = db.scalar(
+        select(AiJob).where(AiJob.id == job_id, AiJob.user_id == user.id).with_for_update()
+    )
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     if job.status != "failed":
         raise HTTPException(status_code=409, detail="Only failed jobs can be retried")
+    if job.attempts >= settings.worker_max_attempts:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "retry_limit_exceeded", "message": "Đã hết số lần xử lý cho job"},
+        )
+    try:
+        ensure_job_configuration(settings, job.model_provider, job.input_ref, job.job_type)
+    except AIProviderError as exc:
+        raise provider_http_error(exc) from exc
     job.status = "queued"
     job.error_code = None
     job.error_message = None
     job.started_at = None
     job.completed_at = None
+    job.next_attempt_at = None
+    job.lock_token = None
+    job.locked_at = None
+    if job.job_type == "catalogue":
+        asset = get_owned_asset_or_404(db, user.id, str(job.input_ref.get("asset_id", "")))
+        asset.status = "analyzing"
+    elif job.job_type in {"lookbook", "variation"}:
+        lookbook = get_owned_lookbook_or_404(db, user.id, str(job.input_ref.get("lookbook_id", "")))
+        lookbook.status = "generating"
     db.commit()
     return JobCreatedResponse(job_id=job.id)
 
 
 @router.get("/approvals", response_model=list[ApprovalResponse])
-def list_approvals(db: DB, user: CurrentUser, approval_status: str | None = None) -> list[ApprovalRequest]:
+def list_approvals(
+    db: DB, user: CurrentUser, approval_status: str | None = None
+) -> list[ApprovalRequest]:
     statement = select(ApprovalRequest).where(ApprovalRequest.user_id == user.id)
     if approval_status:
         statement = statement.where(ApprovalRequest.status == approval_status)
@@ -341,7 +582,9 @@ def decide_approval(
     approval_id: str, payload: ApprovalDecisionRequest, db: DB, user: CurrentUser
 ) -> ApprovalRequest:
     approval = db.scalar(
-        select(ApprovalRequest).where(ApprovalRequest.id == approval_id, ApprovalRequest.user_id == user.id)
+        select(ApprovalRequest)
+        .where(ApprovalRequest.id == approval_id, ApprovalRequest.user_id == user.id)
+        .with_for_update()
     )
     if not approval:
         raise HTTPException(status_code=404, detail="Approval request not found")
@@ -361,3 +604,21 @@ def decide_approval(
     db.refresh(approval)
     return approval
 
+
+@router.post("/looks/{look_id}/feedback", response_model=LookFeedbackResponse, status_code=201)
+def look_feedback(look_id: str, payload: LookFeedbackRequest, db: DB, user: CurrentUser):
+    look = db.scalar(
+        select(Look).join(Lookbook).where(Look.id == look_id, Lookbook.user_id == user.id)
+    )
+    if not look:
+        raise HTTPException(status_code=404, detail="Look not found")
+    signal = StyleSignal(
+        user_id=user.id,
+        look_id=look.id,
+        signal=payload.signal,
+        weight=1 if payload.signal == "like" else -1,
+    )
+    db.add(signal)
+    db.commit()
+    db.refresh(signal)
+    return signal

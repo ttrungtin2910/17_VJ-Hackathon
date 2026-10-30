@@ -8,7 +8,6 @@ from fastapi.responses import FileResponse
 from garblo.api.routes import router
 from garblo.config import get_settings
 
-
 settings = get_settings()
 app = FastAPI(title=settings.app_name, version="0.1.0")
 app.add_middleware(
@@ -41,5 +40,6 @@ def mock_ui() -> FileResponse:
 
 
 def run() -> None:
-    uvicorn.run("garblo.main:app", host="0.0.0.0", port=8000, reload=settings.app_env == "development")
-
+    uvicorn.run(
+        "garblo.main:app", host="0.0.0.0", port=8000, reload=settings.app_env == "development"
+    )

@@ -5,7 +5,6 @@ from passlib.context import CryptContext
 
 from garblo.config import Settings
 
-
 password_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
@@ -20,7 +19,9 @@ def verify_password(password: str, password_hash: str) -> bool:
 def create_access_token(subject: str, settings: Settings) -> tuple[str, datetime]:
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=settings.jwt_access_token_minutes)
     payload = {"sub": subject, "exp": expires_at, "typ": "access"}
-    return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm), expires_at
+    return jwt.encode(
+        payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm
+    ), expires_at
 
 
 def decode_access_token(token: str, settings: Settings) -> str | None:
@@ -30,4 +31,3 @@ def decode_access_token(token: str, settings: Settings) -> str | None:
         return None
     subject = payload.get("sub")
     return subject if isinstance(subject, str) and payload.get("typ") == "access" else None
-

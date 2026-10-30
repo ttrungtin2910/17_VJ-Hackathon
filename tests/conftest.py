@@ -1,41 +1,163 @@
+import io
+import os
 from collections.abc import Generator
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from PIL import Image
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
+# Không khởi tạo engine PostgreSQL mặc định hoặc đọc .env thật lúc import app.
+os.environ.setdefault("DATABASE_URL", "sqlite://")
+
+from garblo.ai import RenderedLook
+from garblo.ai_providers.contracts import Analysis, AnalysisResult
 from garblo.config import Settings, get_settings
 from garblo.database import Base, get_db
-import garblo.models  # noqa: F401
 from garblo.main import app
+from garblo.worker import JobWorker
+
+ATTRIBUTES = {
+    "category": "shirt",
+    "color": "blue",
+    "material": None,
+    "season": None,
+    "tags": ["casual"],
+}
 
 
 @pytest.fixture()
-def client() -> Generator[TestClient, None, None]:
-    engine = create_engine("sqlite://", connect_args={"check_same_thread": False})
-    testing_session = sessionmaker(bind=engine, expire_on_commit=False)
+def settings(monkeypatch) -> Settings:
+    for name in list(os.environ):
+        if name.startswith(("OPENAI_", "FPT_", "AZURE_OPENAI_", "LANGCHAIN_", "LANGSMITH_")):
+            monkeypatch.delenv(name)
+    return Settings(
+        _env_file=None,
+        app_env="test",
+        database_url="sqlite://",
+        jwt_secret_key="test-secret-key-that-is-long-enough",
+        enable_api_mock_ui=True,
+        openai_api_key="test-openai-key",
+        openai_vlm_model="test-vision",
+        openai_image_model="test-image",
+    )
+
+
+@pytest.fixture()
+def db_factory():
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+
+    @event.listens_for(engine, "connect")
+    def foreign_keys(connection, _):
+        connection.execute("PRAGMA foreign_keys=ON")
+
     Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    yield factory
+    Base.metadata.drop_all(engine)
+    engine.dispose()
 
+
+@pytest.fixture()
+def db(db_factory):
+    with db_factory() as session:
+        yield session
+
+
+@pytest.fixture()
+def image_bytes():
+    output = io.BytesIO()
+    Image.new("RGB", (24, 32), "blue").save(output, format="PNG")
+    return output.getvalue()
+
+
+class MemoryStorage:
+    def __init__(self):
+        self.objects = {}
+        self.downloads = []
+
+    def put_bytes(self, key, body, mime):
+        self.objects[key] = body
+
+    def get_bytes(self, key):
+        return self.objects[key]
+
+    def presign_get(self, key):
+        self.downloads.append(key)
+        return "https://private-storage.invalid/signed-test-image"
+
+
+@pytest.fixture()
+def storage(monkeypatch):
+    storage = MemoryStorage()
+    monkeypatch.setattr("garblo.api.routes.storage_or_503", lambda _: storage)
+    return storage
+
+
+@pytest.fixture()
+def client(db_factory, settings, storage) -> Generator[TestClient, None, None]:
     def override_db() -> Generator[Session, None, None]:
-        db = testing_session()
-        try:
-            yield db
-        finally:
-            db.close()
-
-    def override_settings() -> Settings:
-        return Settings(
-            app_env="test",
-            database_url="sqlite://",
-            jwt_secret_key="test-secret-key-that-is-long-enough",
-            enable_api_mock_ui=True,
-        )
+        with db_factory() as session:
+            yield session
 
     app.dependency_overrides[get_db] = override_db
-    app.dependency_overrides[get_settings] = override_settings
-    with TestClient(app) as test_client:
-        yield test_client
-    app.dependency_overrides.clear()
-    Base.metadata.drop_all(engine)
+    app.dependency_overrides[get_settings] = lambda: settings
+    try:
+        with TestClient(app) as test_client:
+            yield test_client
+    finally:
+        app.dependency_overrides.clear()
 
+
+@pytest.fixture()
+def headers(client):
+    from tests.helpers import auth_headers
+
+    return auth_headers(client)
+
+
+@pytest.fixture()
+def asset_id(client, headers, image_bytes):
+    from tests.helpers import upload
+
+    return upload(client, headers, image_bytes)
+
+
+@pytest.fixture()
+def providers(image_bytes):
+    class FakeProvider:
+        def analyze(self, image, mime_type, before_call):
+            before_call()
+            calls.append(("analyze", self.provider, self.model, mime_type))
+            if state.error:
+                raise state.error
+            return Analysis(AnalysisResult.model_validate({"items": state.items}))
+
+        def render_look(self, *, before_call, **kwargs):
+            before_call()
+            calls.append(("render", self.provider, self.model, self.image_model))
+            if state.error:
+                raise state.error
+            before_call()
+            return RenderedLook(image_bytes, "image/png", "A test outfit", self.image_model)
+
+    calls = []
+    state = SimpleNamespace(error=None, items=[dict(ATTRIBUTES)], calls=calls)
+
+    def resolve(provider, model, image_model=None):
+        instance = FakeProvider()
+        instance.provider, instance.model, instance.image_model = provider, model, image_model
+        return instance
+
+    state.resolve = resolve
+    return state
+
+
+@pytest.fixture()
+def worker(db, storage, providers, settings):
+    return JobWorker(db, storage, providers, settings)

@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,12 +20,26 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000,http://localhost:5173"
 
     s3_endpoint_url: str | None = None
+    s3_public_endpoint_url: str | None = None
     s3_access_key: str | None = None
     s3_secret_key: str | None = None
     s3_bucket: str = "garblo-assets"
     s3_region: str = "us-east-1"
     s3_presign_seconds: int = 900
     max_upload_bytes: int = 10 * 1024 * 1024
+    max_image_pixels: int = 25_000_000
+
+    openai_api_key: SecretStr | None = None
+    openai_vlm_model: str | None = None
+    openai_image_model: str | None = None
+    fpt_vlm_api_key: SecretStr | None = None
+    fpt_vlm_base_url: str = "https://mkp-api.fptcloud.com/v1"
+    fpt_vlm_model: str = "Qwen2.5-VL-7B-Instruct"
+    fpt_vlm_timeout_seconds: float = Field(default=60, gt=0, le=120)
+    openai_timeout_seconds: float = Field(default=120, gt=0, le=180)
+    worker_max_attempts: int = Field(default=3, ge=1, le=10)
+    worker_lease_seconds: int = Field(default=900, ge=600)
+    worker_retry_base_seconds: float = Field(default=5, gt=0)
 
     azure_openai_endpoint: str | None = None
     azure_openai_api_key: str | None = None
@@ -33,12 +47,36 @@ class Settings(BaseSettings):
     azure_openai_chat_deployment: str | None = None
     azure_openai_image_deployment: str | None = None
 
+    @field_validator(
+        "openai_api_key",
+        "fpt_vlm_api_key",
+        "openai_vlm_model",
+        "openai_image_model",
+        mode="before",
+    )
+    @classmethod
+    def empty_to_none(cls, value):
+        return None if isinstance(value, str) and not value.strip() else value
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
     @property
     def ai_is_configured(self) -> bool:
+        return self.analysis_is_configured("openai") and bool(self.openai_image_model)
+
+    def analysis_is_configured(self, provider: str) -> bool:
+        if provider == "openai":
+            return bool(self.openai_api_key and self.openai_vlm_model)
+        if provider == "fpt":
+            return bool(self.fpt_vlm_api_key and self.fpt_vlm_model)
+        if provider == "azure_openai":
+            return self.azure_is_configured
+        return False
+
+    @property
+    def azure_is_configured(self) -> bool:
         return all(
             (
                 self.azure_openai_endpoint,
@@ -57,4 +95,3 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-

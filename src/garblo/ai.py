@@ -3,10 +3,10 @@ from __future__ import annotations
 import base64
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import AzureChatOpenAI
 from openai import AzureOpenAI
@@ -15,7 +15,12 @@ from garblo.config import Settings
 
 
 class AIProviderError(RuntimeError):
-    """The configured AI provider rejected or could not complete a job."""
+    """Lỗi đã loại dữ liệu nhạy cảm, an toàn để lưu vào job."""
+
+    def __init__(self, message: str, code: str = "provider_error", retryable: bool = False):
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
 
 
 @dataclass(frozen=True)
@@ -30,7 +35,7 @@ class AzureLookbookProvider:
     """Azure adapter. It is instantiated only after configuration preflight succeeds."""
 
     def __init__(self, settings: Settings):
-        if not settings.ai_is_configured:
+        if not settings.azure_is_configured:
             raise AIProviderError("Azure OpenAI is not configured")
         self.settings = settings
         self.chat = AzureChatOpenAI(
@@ -39,11 +44,15 @@ class AzureLookbookProvider:
             api_version=settings.azure_openai_api_version,
             azure_deployment=settings.azure_openai_chat_deployment,
             temperature=0,
+            max_retries=0,
+            timeout=settings.openai_timeout_seconds,
         )
         self.images = AzureOpenAI(
             azure_endpoint=settings.azure_openai_endpoint,
             api_key=settings.azure_openai_api_key,
             api_version=settings.azure_openai_api_version,
+            max_retries=0,
+            timeout=settings.openai_timeout_seconds,
         )
 
     @staticmethod
@@ -74,7 +83,9 @@ class AzureLookbookProvider:
             ]
         )
         try:
-            response = self.chat.invoke([SystemMessage(content="You are a fashion catalogue assistant."), message])
+            response = self.chat.invoke(
+                [SystemMessage(content="You are a fashion catalogue assistant."), message]
+            )
             return self._json_object(str(response.content))
         except AIProviderError:
             raise
@@ -88,6 +99,7 @@ class AzureLookbookProvider:
         theme: str | None,
         occasion: str | None,
         instruction: str | None,
+        before_call: Callable[[], None] = lambda: None,
     ) -> RenderedLook:
         wardrobe = json.dumps(garments, ensure_ascii=False)
         planner = HumanMessage(
@@ -98,10 +110,14 @@ class AzureLookbookProvider:
             )
         )
         try:
-            response = self.chat.invoke([SystemMessage(content="You are a precise fashion stylist."), planner])
+            before_call()
+            response = self.chat.invoke(
+                [SystemMessage(content="You are a precise fashion stylist."), planner]
+            )
             prompt = self._json_object(str(response.content)).get("image_prompt")
             if not isinstance(prompt, str) or not prompt.strip():
                 raise AIProviderError("Azure planner did not return image_prompt")
+            before_call()
             result = self.images.images.generate(
                 model=self.settings.azure_openai_image_deployment,
                 prompt=prompt,
@@ -111,10 +127,6 @@ class AzureLookbookProvider:
             image = result.data[0]
             if getattr(image, "b64_json", None):
                 image_bytes = base64.b64decode(image.b64_json)
-            elif getattr(image, "url", None):
-                download = httpx.get(image.url, timeout=60)
-                download.raise_for_status()
-                image_bytes = download.content
             else:
                 raise AIProviderError("Azure image response did not contain image data")
             return RenderedLook(
@@ -127,4 +139,3 @@ class AzureLookbookProvider:
             raise
         except Exception as exc:
             raise AIProviderError("Azure look rendering failed") from exc
-

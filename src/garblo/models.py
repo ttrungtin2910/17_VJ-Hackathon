@@ -4,7 +4,16 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import JSON
@@ -24,7 +33,9 @@ JsonType = JSON().with_variant(JSONB(), "postgresql")
 
 
 class Timestamped:
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, nullable=False
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=now_utc, onupdate=now_utc, nullable=False
     )
@@ -48,7 +59,9 @@ class ConsentRecord(Timestamped, Base):
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     purpose: Mapped[str] = mapped_column(String(80), index=True)
     policy_version: Mapped[str] = mapped_column(String(80))
-    granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, nullable=False)
+    granted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, nullable=False
+    )
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -62,7 +75,9 @@ class MediaAsset(Timestamped, Base):
     mime_type: Mapped[str] = mapped_column(String(100), nullable=False)
     checksum: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     byte_size: Mapped[int] = mapped_column(Integer, nullable=False)
-    metadata_json: Mapped[dict[str, Any]] = mapped_column("metadata", JsonType, default=dict, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JsonType, default=dict, nullable=False
+    )
     status: Mapped[str] = mapped_column(String(40), default="uploaded", nullable=False)
 
 
@@ -71,7 +86,9 @@ class Garment(Timestamped, Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    source_asset_id: Mapped[str] = mapped_column(ForeignKey("media_assets.id", ondelete="RESTRICT"), index=True)
+    source_asset_id: Mapped[str] = mapped_column(
+        ForeignKey("media_assets.id", ondelete="RESTRICT"), index=True
+    )
     category: Mapped[str | None] = mapped_column(String(80))
     color: Mapped[str | None] = mapped_column(String(80))
     material: Mapped[str | None] = mapped_column(String(80))
@@ -91,15 +108,24 @@ class Lookbook(Timestamped, Base):
     theme: Mapped[str | None] = mapped_column(String(120))
     occasion: Mapped[str | None] = mapped_column(String(120))
     status: Mapped[str] = mapped_column(String(40), default="draft", nullable=False)
-    cover_asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id", ondelete="SET NULL"))
+    cover_asset_id: Mapped[str | None] = mapped_column(
+        ForeignKey("media_assets.id", ondelete="SET NULL")
+    )
 
 
 class Look(Timestamped, Base):
     __tablename__ = "looks"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
-    lookbook_id: Mapped[str] = mapped_column(ForeignKey("lookbooks.id", ondelete="CASCADE"), index=True)
-    generated_asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id", ondelete="SET NULL"))
+    source_job_id: Mapped[str | None] = mapped_column(
+        ForeignKey("ai_jobs.id", ondelete="RESTRICT"), unique=True
+    )
+    lookbook_id: Mapped[str] = mapped_column(
+        ForeignKey("lookbooks.id", ondelete="CASCADE"), index=True
+    )
+    generated_asset_id: Mapped[str | None] = mapped_column(
+        ForeignKey("media_assets.id", ondelete="SET NULL")
+    )
     generation_prompt: Mapped[str] = mapped_column(Text, nullable=False)
     model_reference: Mapped[str | None] = mapped_column(String(160))
     cmax_score: Mapped[float | None] = mapped_column(Numeric(5, 2))
@@ -112,7 +138,9 @@ class LookItem(Timestamped, Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     look_id: Mapped[str] = mapped_column(ForeignKey("looks.id", ondelete="CASCADE"), index=True)
-    garment_id: Mapped[str] = mapped_column(ForeignKey("garments.id", ondelete="RESTRICT"), index=True)
+    garment_id: Mapped[str] = mapped_column(
+        ForeignKey("garments.id", ondelete="RESTRICT"), index=True
+    )
     role: Mapped[str | None] = mapped_column(String(80))
     layer_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
@@ -125,7 +153,7 @@ class AiJob(Timestamped, Base):
     job_type: Mapped[str] = mapped_column(String(40), index=True)
     input_ref: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict, nullable=False)
     output_ref: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict, nullable=False)
-    model_provider: Mapped[str] = mapped_column(String(80), default="azure_openai", nullable=False)
+    model_provider: Mapped[str] = mapped_column(String(80), default="openai", nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="queued", index=True, nullable=False)
     attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     error_code: Mapped[str | None] = mapped_column(String(80))
@@ -133,6 +161,29 @@ class AiJob(Timestamped, Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lock_token: Mapped[str | None] = mapped_column(String(36))
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+
+
+class GarmentCandidate(Timestamped, Base):
+    __tablename__ = "garment_candidates"
+    __table_args__ = (
+        UniqueConstraint("job_id", "candidate_index", name="uq_candidates_job_index"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    asset_id: Mapped[str] = mapped_column(
+        ForeignKey("media_assets.id", ondelete="RESTRICT"), index=True
+    )
+    job_id: Mapped[str] = mapped_column(ForeignKey("ai_jobs.id", ondelete="RESTRICT"), index=True)
+    candidate_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    attributes_json: Mapped[dict[str, Any]] = mapped_column(JsonType, nullable=False)
+    original_attributes: Mapped[dict[str, Any]] = mapped_column(JsonType, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="draft", nullable=False)
+    garment_id: Mapped[str | None] = mapped_column(
+        ForeignKey("garments.id", ondelete="RESTRICT"), unique=True
+    )
 
 
 class ApprovalRequest(Timestamped, Base):
@@ -145,7 +196,9 @@ class ApprovalRequest(Timestamped, Base):
     action: Mapped[str] = mapped_column(String(80), nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="pending", index=True, nullable=False)
     decision_payload: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict, nullable=False)
-    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, nullable=False
+    )
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
@@ -164,7 +217,8 @@ class TasteMatch(Timestamped, Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    matched_user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    matched_user_id: Mapped[str] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
     similarity_score: Mapped[float] = mapped_column(Numeric(5, 4), nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="new", nullable=False)
-

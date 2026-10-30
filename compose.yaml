@@ -1,0 +1,81 @@
+name: garblo
+
+x-runtime: &runtime
+  build: .
+  image: garblo-backend:local
+  env_file: ${GARBLO_ENV_FILE:-.env}
+  environment:
+    APP_ENV: production
+    ENABLE_API_MOCK_UI: "false"
+    DATABASE_URL: postgresql+psycopg://garblo:${POSTGRES_PASSWORD:-garblo-local-only}@postgres:5432/garblo
+    S3_ENDPOINT_URL: http://rustfs:9000
+    S3_PUBLIC_ENDPOINT_URL: ${S3_PUBLIC_ENDPOINT_URL:-http://localhost:19000}
+    S3_ACCESS_KEY: ${S3_ACCESS_KEY:-garblo}
+    S3_SECRET_KEY: ${S3_SECRET_KEY:?Cần đặt S3_SECRET_KEY trong .env}
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16.6-alpine
+    environment:
+      POSTGRES_USER: garblo
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-garblo-local-only}
+      POSTGRES_DB: garblo
+    ports: ["127.0.0.1:${POSTGRES_PORT:-15433}:5432"]
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U garblo -d garblo"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  rustfs:
+    image: ${RUSTFS_IMAGE:-rustfs/rustfs@sha256:ed9210d6411d77ffceb70d94b964a3cb7d225983368bc25bebe01e995293dcc2}
+    command: ["/data"]
+    environment:
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY:-garblo}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY:?Cần đặt S3_SECRET_KEY trong .env}
+      RUSTFS_CONSOLE_ENABLE: "false"
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_OBS_LOGGER_LEVEL: error
+    ports: ["127.0.0.1:19000:9000"]
+    volumes: ["rustfs-data:/data"]
+    restart: unless-stopped
+
+  storage-init:
+    <<: *runtime
+    command: ["python", "-m", "garblo.storage_init"]
+    depends_on:
+      rustfs: {condition: service_started}
+    restart: "no"
+
+  migrate:
+    <<: *runtime
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres: {condition: service_healthy}
+    restart: "no"
+
+  api:
+    <<: *runtime
+    ports: ["127.0.0.1:${API_PORT:-8000}:8000"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      storage-init: {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    <<: *runtime
+    command: ["garblo-worker"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      storage-init: {condition: service_completed_successfully}
+
+volumes:
+  postgres-data:
+  rustfs-data:
