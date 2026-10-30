@@ -132,10 +132,36 @@ PostgreSQL tests chạy migration trong schema UUID riêng rồi dọn đúng sc
 Storage test chỉ tạo/xóa bucket `garblo-test-<UUID>` do chính test tạo. Không dùng DB/bucket
 production. Migration đầu đã phát hành được giữ nguyên cả nội dung và formatting.
 
+## Catalogue v2 — Chặng A
+
+Job mới mặc định snapshot `catalogue-v2`: tối đa 20 component **ở mức metadata**,
+thuộc tính chưa biết dùng null, không có confidence giả. Job v1/legacy giữ schema/prompt
+tương ứng; đặt `CATALOGUE_SCHEMA_VERSION=1` để ngừng enqueue v2 khi rollback, không sửa
+snapshot job đang chạy. Cần restart cả API/worker sau đổi env.
+
+- Review có `details`, `review`, `schema_version`, `component_asset_id`; attributes cũ vẫn giữ.
+- PATCH candidate `status=draft|rejected`; committed không sửa qua draft.
+- Commit bắt buộc category đã xác nhận, validate cả batch và giữ ID khi retry.
+- Asset có thể `partially_catalogued`; chỉ `catalogued` khi không còn draft chưa xử lý.
+- `/v1/jobs/{id}/calls` là audit từng request; `/v1/me/ai-metrics` chỉ thống kê user hiện tại.
+- Call budget và token reservation ghi DB trước request. Usage thiếu giữ reservation,
+  không coi là miễn phí. Deadline bắt đầu từ request đầu, không reset khi retry/reclaim.
+- Token reservation do operator cấu hình, không phải hard cap chi phí USD upstream;
+  usage có thể vượt estimate. Khi vượt budget không gửi request tiếp theo.
+- P1 opt-in: checksum dedup cùng user, screening relevance bằng model riêng, escalation tối đa
+  một lần/attempt và HTTP segmentation service có mask. Không fallback provider.
+- Screening dùng cùng typed analysis contract, **không phải safety moderation**.
+  `CATALOGUE_NATIVE_STRUCTURED_OUTPUT` chỉ bật sau xác minh capability thật.
+
+Chi tiết: [API catalogue v2](docs/api-catalogue-v2.md),
+[báo cáo nghiệm thu A](docs/architecture/07-acceptance-stage-a.md),
+[ADR](docs/architecture/adr-001-deterministic-pipelines.md).
+
 ## Giới hạn hiện tại
 
-- Một component/ảnh; chưa segmentation, crop mapping, VTON hoặc garment reference images.
-  Lookbook dựng từ metadata nên chưa bảo đảm giống chính xác garment gốc.
+- V2 nhận nhiều metadata component; không tự giả lập ảnh tách. Segmentation chỉ hoạt động khi
+  operator cấu hình service/model thật, trả crop/mask theo contract; chưa kiểm chứng chất lượng
+  segmentation live. Không VTON/garment reference fidelity. Lookbook cũ dựng từ metadata.
 - FPT hỗ trợ JSON envelope/root và parse SSE nếu response thực sự là SSE; runtime key
   của đội vẫn cần xác minh `stream:false`. Không suy đoán wire behavior từ mock.
 - Ảnh được decode, giới hạn pixel, bỏ metadata/EXIF, áp dụng orientation; JPEG chuyển PNG

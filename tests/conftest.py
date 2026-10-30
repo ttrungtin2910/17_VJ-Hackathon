@@ -15,6 +15,7 @@ os.environ.setdefault("DATABASE_URL", "sqlite://")
 
 from garblo.ai import RenderedLook
 from garblo.ai_providers.contracts import Analysis, AnalysisResult
+from garblo.catalogue.contracts import AnalysisResultV2
 from garblo.config import Settings, get_settings
 from garblo.database import Base, get_db
 from garblo.main import app
@@ -59,7 +60,9 @@ def db_factory():
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     yield factory
-    Base.metadata.drop_all(engine)
+    # DB chỉ nằm trong RAM của engine này; dispose xóa toàn bộ fixture.
+    # DROP TABLE với self-FK RESTRICT (asset lineage) lỗi trên SQLite ngay cả khi
+    # không còn reference từ bảng khác. Không tắt FK trong thời gian chạy test.
     engine.dispose()
 
 
@@ -131,11 +134,24 @@ def asset_id(client, headers, image_bytes):
 @pytest.fixture()
 def providers(image_bytes):
     class FakeProvider:
+        def configure_catalogue(self, snapshot):
+            self.schema_version = snapshot.get("schema_version", 1)
+
         def analyze(self, image, mime_type, before_call):
             before_call()
             calls.append(("analyze", self.provider, self.model, mime_type))
             if state.error:
                 raise state.error
+            if getattr(self, "schema_version", 1) == 2:
+                return Analysis(
+                    AnalysisResultV2.model_validate(
+                        {
+                            "schema_version": 2,
+                            "image_type": "single_garment" if state.items else "unrelated",
+                            "items": state.items,
+                        }
+                    )
+                )
             return Analysis(AnalysisResult.model_validate({"items": state.items}))
 
         def render_look(self, *, before_call, **kwargs):

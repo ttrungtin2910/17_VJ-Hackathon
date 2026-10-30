@@ -6,6 +6,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from garblo.ai_providers.contracts import GarmentAttributes, ShortText
+from garblo.catalogue.contracts import ComponentDetails
 
 
 class APIModel(BaseModel):
@@ -59,6 +60,7 @@ class AssetResponse(APIModel):
     metadata: dict[str, Any] = Field(validation_alias="metadata_json")
     status: str
     created_at: datetime
+    parent_asset_id: str | None
 
 
 class AssetDownloadResponse(BaseModel):
@@ -73,6 +75,7 @@ class GarmentPatch(BaseModel):
     season: str | None = Field(default=None, max_length=80)
     tags: list[ShortText] = Field(default_factory=list, max_length=20)
     catalog_status: str | None = Field(default=None, max_length=40)
+    details: ComponentDetails | None = None
 
     @field_validator("catalog_status")
     @classmethod
@@ -93,6 +96,8 @@ class CandidatePatch(BaseModel):
     material: str | None = Field(default=None, max_length=80, min_length=1)
     season: str | None = Field(default=None, max_length=80, min_length=1)
     tags: list[ShortText] = Field(default_factory=list, max_length=20)
+    details: ComponentDetails | None = None
+    status: Literal["draft", "rejected"] | None = None
 
 
 class CandidateResponse(APIModel):
@@ -104,6 +109,10 @@ class CandidateResponse(APIModel):
     garment_id: str | None
     created_at: datetime
     updated_at: datetime
+    schema_version: int
+    details: ComponentDetails = Field(validation_alias="details_json")
+    review: dict[str, Any] = Field(validation_alias="review_json")
+    component_asset_id: str | None
 
 
 class CommitCandidatesRequest(BaseModel):
@@ -125,6 +134,8 @@ class GarmentResponse(APIModel):
     wear_count: int
     catalog_status: str
     created_at: datetime
+    details: ComponentDetails = Field(validation_alias="details_json")
+    component_asset_id: str | None
 
 
 class LookbookCreateRequest(BaseModel):
@@ -177,6 +188,23 @@ class JobResponse(APIModel):
 class JobCreatedResponse(BaseModel):
     job_id: str
     status: Literal["queued"] = "queued"
+
+
+class AICallResponse(APIModel):
+    id: str
+    call_index: int
+    worker_attempt: int
+    stage: str
+    provider: str
+    model: str
+    prompt_version: str | None
+    schema_version: int
+    status: str
+    usage: dict[str, int]
+    latency_ms: int | None
+    error_code: str | None
+    reserved_tokens: int
+    validation_status: str | None
 
 
 class VariationRequest(BaseModel):

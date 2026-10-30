@@ -20,6 +20,8 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from garblo.ai import AIProviderError
+from garblo.ai_providers.contracts import GarmentAttributes
+from garblo.catalogue.metrics import summarize_catalogue
 from garblo.config import Settings, get_settings
 from garblo.consent import active_ai_consent
 from garblo.database import get_db
@@ -27,6 +29,7 @@ from garblo.dependencies import get_current_user, require_ai_configuration
 from garblo.images import sanitize_image
 from garblo.jobs import ensure_job_configuration, new_snapshot
 from garblo.models import (
+    AiCallAttempt,
     AiJob,
     ApprovalRequest,
     ConsentRecord,
@@ -42,6 +45,7 @@ from garblo.models import (
 )
 from garblo.presets import PRESETS, select_preset
 from garblo.schemas import (
+    AICallResponse,
     ApprovalDecisionRequest,
     ApprovalResponse,
     AssetDownloadResponse,
@@ -162,6 +166,11 @@ def grant_consent(payload: ConsentRequest, db: DB, user: CurrentUser) -> Consent
     return consent
 
 
+@router.get("/me/ai-metrics")
+def ai_metrics(db: DB, user: CurrentUser):
+    return summarize_catalogue(db, user.id)
+
+
 @router.delete("/consents/{consent_id}", status_code=status.HTTP_204_NO_CONTENT)
 def revoke_consent(consent_id: str, db: DB, user: CurrentUser) -> Response:
     consent = db.scalar(
@@ -195,6 +204,22 @@ def upload_asset(
         body, mime_type = sanitize_image(body, settings.max_upload_bytes, settings.max_image_pixels)
     except ValueError as exc:
         raise HTTPException(status_code=415, detail=str(exc)) from exc
+    checksum = hashlib.sha256(body).hexdigest()
+    if settings.catalogue_deduplicate_uploads:
+        # Cùng user dùng cùng khóa để serialize cả trường hợp chưa có checksum nào.
+        db.execute(select(User.id).where(User.id == user.id).with_for_update())
+        existing = db.scalar(
+            select(MediaAsset)
+            .where(
+                MediaAsset.user_id == user.id,
+                MediaAsset.checksum == checksum,
+                MediaAsset.asset_type == asset_type[:40],
+            )
+            .order_by(MediaAsset.created_at)
+            .limit(1)
+        )
+        if existing:
+            return existing
     asset_id = new_id()
     extension = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[mime_type]
     object_key = storage_key(user.id, asset_id, f"upload.{extension}")
@@ -204,7 +229,7 @@ def upload_asset(
         object_key=object_key,
         asset_type=asset_type[:40],
         mime_type=mime_type,
-        checksum=hashlib.sha256(body).hexdigest(),
+        checksum=checksum,
         byte_size=len(body),
         status="uploaded",
     )
@@ -300,6 +325,14 @@ def list_candidates(asset_id: str, db: DB, user: CurrentUser):
 
 @router.patch("/candidates/{candidate_id}", response_model=CandidateResponse)
 def patch_candidate(candidate_id: str, payload: CandidatePatch, db: DB, user: CurrentUser):
+    source_id = db.scalar(
+        select(GarmentCandidate.asset_id).where(
+            GarmentCandidate.id == candidate_id, GarmentCandidate.user_id == user.id
+        )
+    )
+    if not source_id:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    asset = db.scalar(select(MediaAsset).where(MediaAsset.id == source_id).with_for_update())
     candidate = db.scalar(
         select(GarmentCandidate)
         .where(GarmentCandidate.id == candidate_id, GarmentCandidate.user_id == user.id)
@@ -307,15 +340,43 @@ def patch_candidate(candidate_id: str, payload: CandidatePatch, db: DB, user: Cu
     )
     if not candidate:
         raise HTTPException(status_code=404, detail="Candidate not found")
-    if candidate.status != "draft":
+    if candidate.status == "committed":
         raise HTTPException(status_code=409, detail="Candidate đã commit; sửa garment thay thế")
+    changes = payload.model_dump(exclude_unset=True)
+    details = changes.pop("details", None)
+    new_status = changes.pop("status", None)
+    if "status" in payload.model_fields_set and new_status is None:
+        raise HTTPException(status_code=422, detail="status không được null")
     candidate.attributes_json = {
         **candidate.attributes_json,
-        **payload.model_dump(exclude_unset=True),
+        **changes,
     }
+    if details is not None:
+        candidate.details_json = {**candidate.details_json, **details}
+    if new_status:
+        candidate.status = new_status
+    candidate.review_json = {
+        **candidate.review_json,
+        "edited_by_user": True,
+        "edited_fields": sorted(set(candidate.review_json.get("edited_fields", [])) | set(changes)),
+    }
+    sync_review_asset(db, asset)
     db.commit()
     db.refresh(candidate)
     return candidate
+
+
+def sync_review_asset(db: Session, asset: MediaAsset) -> None:
+    db.flush()
+    states = list(
+        db.scalars(select(GarmentCandidate.status).where(GarmentCandidate.asset_id == asset.id))
+    )
+    if "draft" in states:
+        asset.status = "partially_catalogued" if "committed" in states else "analyzed"
+    elif "committed" in states:
+        asset.status = "catalogued"
+    elif states:
+        asset.status = "rejected"
 
 
 @router.post("/assets/{asset_id}/commit", response_model=CommitCandidatesResponse)
@@ -342,16 +403,40 @@ def commit_candidates(asset_id: str, payload: CommitCandidatesRequest, db: DB, u
     )
     if len(candidates) != len(ids):
         raise HTTPException(status_code=404, detail="Candidate not found for this asset")
+    # Validate tất cả trước khi tạo bất kỳ garment nào; không spread AI JSON vào ORM.
     for candidate in candidates:
         if candidate.status == "committed" and candidate.garment_id:
             continue
         if candidate.status != "draft":
             raise HTTPException(status_code=409, detail="Candidate không thể commit")
-        garment = Garment(user_id=user.id, source_asset_id=asset_id, **candidate.attributes_json)
+        attributes = GarmentAttributes.model_validate(candidate.attributes_json)
+        if not attributes.category or attributes.category.strip().lower() in {
+            "",
+            "unknown",
+            "unclassified",
+        }:
+            raise HTTPException(status_code=422, detail="Xác nhận danh mục trước khi lưu vào tủ")
+    for candidate in candidates:
+        if candidate.status == "committed" and candidate.garment_id:
+            continue
+        if candidate.status != "draft":
+            raise HTTPException(status_code=409, detail="Candidate không thể commit")
+        attributes = GarmentAttributes.model_validate(candidate.attributes_json)
+        garment = Garment(
+            user_id=user.id,
+            source_asset_id=asset_id,
+            category=attributes.category,
+            color=attributes.color,
+            material=attributes.material,
+            season=attributes.season,
+            tags=attributes.tags,
+            details_json=dict(candidate.details_json),
+            component_asset_id=candidate.component_asset_id,
+        )
         db.add(garment)
         db.flush()
         candidate.garment_id, candidate.status = garment.id, "committed"
-    asset.status = "catalogued"
+    sync_review_asset(db, asset)
     by_id = {candidate.id: candidate.garment_id for candidate in candidates}
     db.commit()
     return CommitCandidatesResponse(garment_ids=[by_id[candidate_id] for candidate_id in ids])
@@ -388,11 +473,19 @@ def get_garment(garment_id: str, db: DB, user: CurrentUser):
 
 @router.patch("/garments/{garment_id}", response_model=GarmentResponse)
 def update_garment(garment_id: str, payload: GarmentPatch, db: DB, user: CurrentUser) -> Garment:
-    garment = db.scalar(select(Garment).where(Garment.id == garment_id, Garment.user_id == user.id))
+    garment = db.scalar(
+        select(Garment)
+        .where(Garment.id == garment_id, Garment.user_id == user.id)
+        .with_for_update()
+    )
     if not garment:
         raise HTTPException(status_code=404, detail="Garment not found")
     for field, value in payload.model_dump(exclude_unset=True).items():
-        setattr(garment, field, value)
+        if field == "details":
+            if value is not None:
+                garment.details_json = {**garment.details_json, **value}
+        else:
+            setattr(garment, field, value)
     db.commit()
     db.refresh(garment)
     return garment
@@ -565,6 +658,19 @@ def retry_job(
         lookbook.status = "generating"
     db.commit()
     return JobCreatedResponse(job_id=job.id)
+
+
+@router.get("/jobs/{job_id}/calls", response_model=list[AICallResponse])
+def job_calls(job_id: str, db: DB, user: CurrentUser):
+    if not db.scalar(select(AiJob.id).where(AiJob.id == job_id, AiJob.user_id == user.id)):
+        raise HTTPException(status_code=404, detail="Job not found")
+    return list(
+        db.scalars(
+            select(AiCallAttempt)
+            .where(AiCallAttempt.job_id == job_id, AiCallAttempt.user_id == user.id)
+            .order_by(AiCallAttempt.call_index)
+        )
+    )
 
 
 @router.get("/approvals", response_model=list[ApprovalResponse])

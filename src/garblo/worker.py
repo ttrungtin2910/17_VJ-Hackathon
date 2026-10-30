@@ -14,6 +14,9 @@ from sqlalchemy.orm import Session
 from garblo.ai import AIProviderError, RenderedLook
 from garblo.ai_providers import ProviderRegistry
 from garblo.ai_providers.contracts import Analysis
+from garblo.catalogue.budget import CallLedger
+from garblo.catalogue.quality import assess_quality
+from garblo.catalogue.stages import run_analysis_stages
 from garblo.config import Settings, get_settings
 from garblo.consent import active_ai_consent
 from garblo.database import SessionLocal
@@ -177,13 +180,36 @@ class JobWorker:
             job.lock_token,
         )
         provider = None
+        ledger = None
         try:
             ensure_job_configuration(self.settings, claim.provider, claim.ref, claim.job_type)
             provider = self.providers.resolve(
                 claim.provider, claim.ref["model"], claim.ref.get("image_model")
             )
             if claim.job_type == "catalogue":
-                result = self._analyze(claim, provider)
+                ledger = CallLedger(self, claim)
+                configure = getattr(provider, "configure_catalogue", None)
+                if configure:
+                    configure(claim.ref)
+                provider.on_result = ledger.on_result
+                provider.on_validation = ledger.on_validation
+                result = self._analyze(claim, provider, ledger)
+                ledger.finish_unknown()
+                ledger.ensure_deadline()
+                if getattr(result.result, "schema_version", 1) != claim.ref.get(
+                    "schema_version", 1
+                ):
+                    raise AIProviderError("Schema không khớp snapshot job", "invalid_model_output")
+            elif claim.job_type == "recommendation_edit":
+                from garblo.recommendations.conversation import plan_edit
+
+                ledger = CallLedger(self, claim)
+                ledger.stage = "intent"
+                provider.on_result = ledger.on_result
+                provider.on_validation = ledger.on_validation
+                result = plan_edit(self.db, claim.user_id, claim.ref, provider, ledger)
+                ledger.finish_unknown()
+                ledger.ensure_deadline()
             elif claim.job_type in {"lookbook", "variation"}:
                 result = self._render(claim, provider)
             else:
@@ -195,7 +221,11 @@ class JobWorker:
                 return True
             if not active_ai_consent(self.db, claim.user_id):
                 raise AIProviderError("Consent đã bị rút khi đang xử lý", "consent_revoked")
-            if isinstance(result, Analysis):
+            if claim.job_type == "recommendation_edit":
+                from garblo.recommendations.conversation import save_edit
+
+                output = save_edit(self.db, claim.user_id, claim.ref, result)
+            elif isinstance(result, Analysis):
                 output = self._save_analysis(claim, result)
             else:
                 output = self._save_render(claim, result)
@@ -218,6 +248,8 @@ class JobWorker:
                 if isinstance(exc, AIProviderError)
                 else AIProviderError("Không thể hoàn thành tác vụ AI", "internal_error")
             )
+            if ledger:
+                ledger.finish_unknown(error.code)
             # Không ghi traceback/raw exception: có thể chứa body, prompt, key hoặc signed URL.
             logger.warning("AI job=%s provider=%s code=%s", claim.id, claim.provider, error.code)
             job = self._owned_claim(claim, lock=True)
@@ -243,7 +275,7 @@ class JobWorker:
                 close()
         return True
 
-    def _analyze(self, claim: Claim, provider) -> Analysis:
+    def _analyze(self, claim: Claim, provider, ledger) -> Analysis:
         asset = self.db.scalar(
             select(MediaAsset).where(
                 MediaAsset.id == claim.ref.get("asset_id"), MediaAsset.user_id == claim.user_id
@@ -261,7 +293,7 @@ class JobWorker:
             )
         except ValueError as exc:
             raise AIProviderError("Ảnh nguồn không hợp lệ", "invalid_source_image") from exc
-        return provider.analyze(image, mime, before_call=lambda: self._before_call(claim))
+        return run_analysis_stages(self, claim, image, mime, ledger, provider)
 
     def _save_analysis(self, claim: Claim, analysis: Analysis) -> dict:
         asset = self.db.scalar(
@@ -272,14 +304,50 @@ class JobWorker:
         if not asset:
             raise AIProviderError("Ảnh nguồn không còn tồn tại", "source_not_found")
         ids = []
+        if getattr(analysis.result, "image_type", None) == "unrelated" and analysis.result.items:
+            raise AIProviderError(
+                "Kết quả phân loại ảnh mâu thuẫn với components", "invalid_model_output"
+            )
+        segments = {part["candidate_index"]: part for part in analysis.metadata.get("segments", [])}
         for index, attributes in enumerate(analysis.result.items):
+            quality = assess_quality(attributes)
+            basic, details, reasons = quality.attributes, quality.details, quality.reasons
+            component_asset_id = None
+            mask_asset_id = None
+            if index in segments:
+                part = segments[index]
+                mask = self._save_component_asset(
+                    claim, asset.id, index, "mask", part["mask_bytes"], "image/png"
+                )
+                component = self._save_component_asset(
+                    claim,
+                    asset.id,
+                    index,
+                    "component",
+                    part["image_bytes"],
+                    part["mime_type"],
+                    mask.id,
+                )
+                component_asset_id, mask_asset_id = component.id, mask.id
             candidate = GarmentCandidate(
                 user_id=claim.user_id,
                 asset_id=asset.id,
                 job_id=claim.id,
                 candidate_index=index,
-                attributes_json=attributes.model_dump(),
-                original_attributes=attributes.model_dump(),
+                attributes_json=basic,
+                original_attributes=basic,
+                schema_version=getattr(analysis.result, "schema_version", 1),
+                details_json=details,
+                component_asset_id=component_asset_id,
+                review_json={
+                    "needs_review": True,
+                    "reason_codes": reasons,
+                    "original_details": details,
+                    "edited_by_user": False,
+                    "mask_asset_id": mask_asset_id,
+                    "analysis_model": analysis.metadata.get("analysis_model", claim.ref["model"]),
+                    "prompt_version": claim.ref.get("prompt_version"),
+                },
             )
             self.db.add(candidate)
             self.db.flush()
@@ -291,9 +359,37 @@ class JobWorker:
             "result": "candidates" if ids else "no_items",
             "provider": claim.provider,
             "model": claim.ref["model"],
+            "analysis_model": analysis.metadata.get("analysis_model", claim.ref["model"]),
             "latency_ms": analysis.metadata.get("latency_ms"),
             "usage": self._safe_usage(analysis.metadata.get("usage")),
+            "schema_version": getattr(analysis.result, "schema_version", 1),
+            "stage": "human_review" if ids else "completed",
         }
+
+    def _save_component_asset(self, claim, parent_id, index, role, body, mime, mask_id=None):
+        asset_id = new_id()
+        key = f"users/{claim.user_id}/components/{claim.id}/{claim.token}/{index}-{role}-{asset_id}.png"
+        asset = MediaAsset(
+            id=asset_id,
+            user_id=claim.user_id,
+            object_key=key,
+            asset_type=role,
+            mime_type=mime,
+            checksum=hashlib.sha256(body).hexdigest(),
+            byte_size=len(body),
+            parent_asset_id=parent_id,
+            status="ready",
+            metadata_json={
+                "job_id": claim.id,
+                "candidate_index": index,
+                "mask_asset_id": mask_id,
+                "model": claim.ref.get("segmentation_model"),
+            },
+        )
+        self.storage.put_bytes(key, body, mime)
+        self.db.add(asset)
+        self.db.flush()
+        return asset
 
     @staticmethod
     def _safe_usage(usage: Any) -> dict:

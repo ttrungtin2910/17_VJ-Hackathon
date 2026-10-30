@@ -1,5 +1,6 @@
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -40,6 +41,42 @@ class Settings(BaseSettings):
     worker_max_attempts: int = Field(default=3, ge=1, le=10)
     worker_lease_seconds: int = Field(default=900, ge=600)
     worker_retry_base_seconds: float = Field(default=5, gt=0)
+    catalogue_schema_version: Literal[1, 2] = 2
+    catalogue_max_calls: int = Field(default=6, ge=1, le=20)
+    catalogue_max_output_tokens: int = Field(default=4096, ge=256, le=8192)
+    catalogue_token_budget: int = Field(default=100_000, ge=1024)
+    catalogue_call_token_reservation: int = Field(default=16384, ge=1024)
+    catalogue_deadline_seconds: float = Field(default=300, gt=0, le=500)
+    catalogue_native_structured_output: bool = False
+    catalogue_supports_temperature: bool = True
+    catalogue_deduplicate_uploads: bool = False
+    catalogue_screening_model: str | None = None
+    catalogue_escalation_model: str | None = None
+    catalogue_segmentation_url: str | None = None
+    catalogue_segmentation_model: str | None = None
+    catalogue_segmentation_timeout_seconds: float = Field(default=30, gt=0, le=60)
+    stylist_intent_model: str | None = None
+    stylist_intent_max_calls: int = Field(default=3, ge=1, le=6)
+    stylist_intent_native_structured_output: bool = False
+
+    @field_validator("catalogue_segmentation_url")
+    @classmethod
+    def segmentation_endpoint(cls, value):
+        if not value:
+            return None
+        url = urlsplit(value)
+        if (
+            url.scheme not in {"http", "https"}
+            or not url.hostname
+            or url.username
+            or url.password
+            or url.query
+            or url.fragment
+        ):
+            raise ValueError(
+                "Segmentation URL phải là endpoint HTTP(S) cố định, không credential/query"
+            )
+        return value
 
     azure_openai_endpoint: str | None = None
     azure_openai_api_key: str | None = None
@@ -52,6 +89,10 @@ class Settings(BaseSettings):
         "fpt_vlm_api_key",
         "openai_vlm_model",
         "openai_image_model",
+        "catalogue_screening_model",
+        "catalogue_escalation_model",
+        "catalogue_segmentation_model",
+        "stylist_intent_model",
         mode="before",
     )
     @classmethod

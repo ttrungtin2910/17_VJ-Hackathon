@@ -79,6 +79,9 @@ class MediaAsset(Timestamped, Base):
         "metadata", JsonType, default=dict, nullable=False
     )
     status: Mapped[str] = mapped_column(String(40), default="uploaded", nullable=False)
+    parent_asset_id: Mapped[str | None] = mapped_column(
+        ForeignKey("media_assets.id", ondelete="RESTRICT"), index=True
+    )
 
 
 class Garment(Timestamped, Base):
@@ -97,6 +100,10 @@ class Garment(Timestamped, Base):
     wear_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_worn_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     catalog_status: Mapped[str] = mapped_column(String(40), default="active", nullable=False)
+    details_json: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict, nullable=False)
+    component_asset_id: Mapped[str | None] = mapped_column(
+        ForeignKey("media_assets.id", ondelete="RESTRICT")
+    )
 
 
 class Lookbook(Timestamped, Base):
@@ -163,6 +170,7 @@ class AiJob(Timestamped, Base):
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     lock_token: Mapped[str | None] = mapped_column(String(36))
     next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    execution_deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class GarmentCandidate(Timestamped, Base):
@@ -180,10 +188,41 @@ class GarmentCandidate(Timestamped, Base):
     candidate_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     attributes_json: Mapped[dict[str, Any]] = mapped_column(JsonType, nullable=False)
     original_attributes: Mapped[dict[str, Any]] = mapped_column(JsonType, nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    details_json: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict, nullable=False)
+    review_json: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict, nullable=False)
+    component_asset_id: Mapped[str | None] = mapped_column(
+        ForeignKey("media_assets.id", ondelete="RESTRICT")
+    )
     status: Mapped[str] = mapped_column(String(30), default="draft", nullable=False)
     garment_id: Mapped[str | None] = mapped_column(
         ForeignKey("garments.id", ondelete="RESTRICT"), unique=True
     )
+
+
+class AiCallAttempt(Timestamped, Base):
+    """Một reservation bền vững cho mỗi request; reserved có thể đã phát sinh phí."""
+
+    __tablename__ = "ai_call_attempts"
+    __table_args__ = (UniqueConstraint("job_id", "call_index", name="uq_ai_calls_job_index"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    job_id: Mapped[str] = mapped_column(ForeignKey("ai_jobs.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    call_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    worker_attempt: Mapped[int] = mapped_column(Integer, nullable=False)
+    stage: Mapped[str] = mapped_column(String(40), nullable=False)
+    provider: Mapped[str] = mapped_column(String(80), nullable=False)
+    model: Mapped[str] = mapped_column(String(160), nullable=False)
+    prompt_version: Mapped[str | None] = mapped_column(String(80))
+    schema_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="reserved", nullable=False)
+    usage: Mapped[dict[str, Any]] = mapped_column(JsonType, default=dict, nullable=False)
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    error_code: Mapped[str | None] = mapped_column(String(80))
+
+    reserved_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    validation_status: Mapped[str | None] = mapped_column(String(30))
 
 
 class ApprovalRequest(Timestamped, Base):

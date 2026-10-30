@@ -10,13 +10,15 @@ from types import SimpleNamespace
 import pytest
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import sessionmaker
 
-from garblo.ai_providers.contracts import Analysis, AnalysisResult
+from garblo.ai_providers.contracts import Analysis
+from garblo.catalogue.contracts import AnalysisResultV2
 from garblo.config import get_settings
 from garblo.database import get_db
 from garblo.main import app
@@ -75,7 +77,10 @@ def test_postgres_migration_flow_and_concurrent_commit(
     asset_id = upload(client, headers, image_bytes)
     job_id = catalogue(client, headers, asset_id)
     with runtime.factory() as db:
-        assert db.scalar(text("SELECT version_num FROM alembic_version")) == "20261030_0002"
+        assert (
+            db.scalar(text("SELECT version_num FROM alembic_version"))
+            == ScriptDirectory.from_config(Config("alembic.ini")).get_current_head()
+        )
         assert JobWorker(db, storage, providers, settings).process_next()
         candidate_id = db.scalar(select(GarmentCandidate.id))
         assert db.get(AiJob, job_id).status == "succeeded"
@@ -155,7 +160,15 @@ def test_postgres_concurrent_providers_keep_separate_snapshots(
                     before_call()
                     barrier.wait(timeout=10)
                     calls.append((provider, model))
-                    return Analysis(AnalysisResult.model_validate({"items": [ATTRIBUTES]}))
+                    return Analysis(
+                        AnalysisResultV2.model_validate(
+                            {
+                                "schema_version": 2,
+                                "image_type": "single_garment",
+                                "items": [ATTRIBUTES],
+                            }
+                        )
+                    )
 
             return Analyzer()
 
@@ -221,3 +234,142 @@ def test_postgres_lookbook_and_concurrent_approval(
     with runtime.factory() as db:
         assert db.get(ApprovalRequest, approval_id).status == winner
         assert db.get(Look, look_id).status == winner
+
+
+def test_postgres_multi_component_concurrent_partial_commit(
+    postgres_runtime, image_bytes, storage, providers, settings
+):
+    from garblo.models import MediaAsset
+
+    runtime = postgres_runtime
+    headers = auth_headers(runtime.client)
+    asset_id = upload(runtime.client, headers, image_bytes)
+    providers.items = [dict(ATTRIBUTES), {**ATTRIBUTES, "category": "pants"}]
+    job_id = catalogue(runtime.client, headers, asset_id)
+    with runtime.factory() as db:
+        assert JobWorker(db, storage, providers, settings).process_next()
+        ids = db.get(AiJob, job_id).output_ref["candidate_ids"]
+    barrier = Barrier(2)
+
+    def commit(candidate_id):
+        barrier.wait(timeout=10)
+        response = runtime.client.post(
+            f"/v1/assets/{asset_id}/commit", headers=headers, json={"candidate_ids": [candidate_id]}
+        )
+        assert response.status_code == 200, response.text
+        return response.json()["garment_ids"][0]
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(commit, candidate_id) for candidate_id in ids]
+        garment_ids = [future.result(timeout=20) for future in futures]
+    assert len(set(garment_ids)) == 2
+    with runtime.factory() as db:
+        assert db.get(MediaAsset, asset_id).status == "catalogued"
+        assert db.scalar(select(func.count()).select_from(Garment)) == 2
+
+
+def test_postgres_upgrade_preserves_legacy_wardrobe_and_draft(postgres_runtime):
+    runtime = postgres_runtime
+    config = Config("alembic.ini")
+    command.downgrade(config, "20261030_0002")
+    with runtime.engine.begin() as connection:
+        connection.execute(
+            text("""
+            INSERT INTO users (id,email,display_name,password_hash,style_profile,social_opt_in,created_at,updated_at)
+            VALUES ('legacy-user','legacy@example.com','Cũ','not-a-real-password','{}',false,now(),now())
+        """)
+        )
+        connection.execute(
+            text("""
+            INSERT INTO media_assets (id,user_id,object_key,asset_type,mime_type,checksum,byte_size,metadata,status,created_at,updated_at)
+            VALUES ('legacy-asset','legacy-user','legacy/source.png','garment_photo','image/png','checksum',10,'{}','analyzed',now(),now())
+        """)
+        )
+        connection.execute(
+            text("""
+            INSERT INTO ai_jobs (id,user_id,job_type,input_ref,output_ref,model_provider,status,attempts,created_at,updated_at)
+            VALUES ('legacy-job','legacy-user','catalogue','{"asset_id":"legacy-asset","model":"legacy-model"}','{}','openai','succeeded',1,now(),now())
+        """)
+        )
+        connection.execute(
+            text("""
+            INSERT INTO garments (id,user_id,source_asset_id,category,tags,wear_count,catalog_status,created_at,updated_at)
+            VALUES ('legacy-garment','legacy-user','legacy-asset','shirt','[]',0,'active',now(),now())
+        """)
+        )
+        connection.execute(
+            text("""
+            INSERT INTO garment_candidates (id,user_id,asset_id,job_id,candidate_index,attributes_json,original_attributes,status,created_at,updated_at)
+            VALUES ('legacy-candidate','legacy-user','legacy-asset','legacy-job',0,'{}','{}','draft',now(),now())
+        """)
+        )
+    command.upgrade(config, "head")
+    with runtime.factory() as db:
+        garment = db.get(Garment, "legacy-garment")
+        candidate = db.get(GarmentCandidate, "legacy-candidate")
+        assert garment.category == "shirt" and garment.details_json == {}
+        assert candidate.schema_version == 1 and candidate.details_json == {}
+        assert db.get(AiJob, "legacy-job").input_ref["model"] == "legacy-model"
+
+
+def test_postgres_concurrent_garment_detail_patches_keep_both_fields(
+    postgres_runtime, image_bytes, storage, providers, settings
+):
+    runtime = postgres_runtime
+    headers = auth_headers(runtime.client)
+    asset_id = upload(runtime.client, headers, image_bytes)
+    catalogue(runtime.client, headers, asset_id)
+    with runtime.factory() as db:
+        JobWorker(db, storage, providers, settings).process_next()
+        candidate_id = db.scalar(select(GarmentCandidate.id))
+    garment_id = runtime.client.post(
+        f"/v1/assets/{asset_id}/commit", headers=headers, json={"candidate_ids": [candidate_id]}
+    ).json()["garment_ids"][0]
+    barrier = Barrier(2)
+
+    def patch(details):
+        barrier.wait(timeout=10)
+        response = runtime.client.patch(
+            f"/v1/garments/{garment_id}", headers=headers, json={"details": details}
+        )
+        assert response.status_code == 200, response.text
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(patch, details)
+            for details in ({"pattern": "solid"}, {"display_name": "Áo mới"})
+        ]
+        for future in futures:
+            future.result(timeout=20)
+    details = runtime.client.get(f"/v1/garments/{garment_id}", headers=headers).json()["details"]
+    assert details["pattern"] == "solid" and details["display_name"] == "Áo mới"
+
+
+@pytest.mark.parametrize("timezone_name", ["UTC", "Asia/Ho_Chi_Minh"])
+def test_postgres_deadline_is_absolute_across_session_timezones(
+    postgres_runtime, image_bytes, storage, providers, settings, timezone_name
+):
+    from garblo.ai import AIProviderError
+    from garblo.catalogue.budget import CallLedger
+
+    runtime = postgres_runtime
+    headers = auth_headers(runtime.client)
+    job_id = catalogue(runtime.client, headers, upload(runtime.client, headers, image_bytes))
+    with runtime.factory() as db:
+        worker = JobWorker(db, storage, providers, settings)
+        job = worker.claim_next()
+        assert job.id == job_id
+        claim = Claim(
+            job.id,
+            job.user_id,
+            job.job_type,
+            job.model_provider,
+            dict(job.input_ref),
+            job.lock_token,
+        )
+        job.execution_deadline_at = utcnow() - timedelta(seconds=30)
+        db.commit()
+        db.execute(text("SELECT set_config('TimeZone', :zone, false)"), {"zone": timezone_name})
+        with pytest.raises(AIProviderError) as error:
+            CallLedger(worker, claim).ensure_deadline()
+        assert error.value.code == "job_deadline_exceeded"
