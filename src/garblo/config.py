@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     catalogue_deduplicate_uploads: bool = False
     catalogue_screening_model: str | None = None
     catalogue_escalation_model: str | None = None
+    fpt_screening_model: str | None = None
+    fpt_escalation_model: str | None = None
     catalogue_segmentation_url: str | None = None
     catalogue_segmentation_model: str | None = None
     catalogue_segmentation_timeout_seconds: float = Field(default=30, gt=0, le=60)
@@ -91,6 +93,8 @@ class Settings(BaseSettings):
         "openai_image_model",
         "catalogue_screening_model",
         "catalogue_escalation_model",
+        "fpt_screening_model",
+        "fpt_escalation_model",
         "catalogue_segmentation_model",
         "stylist_intent_model",
         mode="before",

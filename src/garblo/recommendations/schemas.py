@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -152,6 +152,16 @@ class SessionResponse(StrictModel):
     missing_categories: list[str]
     score_notice: str
     created_at: datetime
+
+    @field_validator("created_at")
+    @classmethod
+    def utc_timestamp(cls, value):
+        # SQLite test loại tzinfo; PostgreSQL giữ timestamp with time zone.
+        return (
+            value.replace(tzinfo=timezone.utc)
+            if value.tzinfo is None
+            else value.astimezone(timezone.utc)
+        )
 
 
 class FeedbackResponse(StrictModel):

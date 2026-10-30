@@ -294,7 +294,7 @@ def test_optional_stages_persist_segment_and_mask_lineage(
             pass
 
     worker.providers = SimpleNamespace(resolve=lambda provider, model, image_model: Provider(model))
-    real_http = httpx.Client
+    real_http = httpx.AsyncClient
 
     def segment(request):
         payload = json.loads(request.content)
@@ -312,7 +312,7 @@ def test_optional_stages_persist_segment_and_mask_lineage(
 
     monkeypatch.setattr(
         stages.httpx,
-        "Client",
+        "AsyncClient",
         lambda **kwargs: real_http(transport=httpx.MockTransport(segment), **kwargs),
     )
     job_id = catalogue(client, headers, asset_id)

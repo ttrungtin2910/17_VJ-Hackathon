@@ -6,6 +6,7 @@ request hay model. Chỉ worker được persist metadata ``segments`` nội b�
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import io
@@ -129,6 +130,33 @@ def _validate_segments(body, count, source_size, max_bytes, max_pixels):
         ) from exc
 
 
+async def _fetch_segments(url, payload, timeout, started):
+    # Absolute deadline bao phủ connect, headers và stream nhỏ giọt; HTTPX read
+    # timeout đơn lẻ không phải giới hạn tổng thời gian của một request.
+    async with asyncio.timeout(timeout):
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            async with client.stream("POST", url, json=payload) as response:
+                if response.status_code != 200:
+                    raise AIProviderError(
+                        "Dịch vụ segmentation trả lỗi",
+                        "segmentation_http_error",
+                        retryable=response.status_code in {408, 429} or response.status_code >= 500,
+                    )
+                body = bytearray()
+                # Không gom đủ 64 KiB trước khi trả quyền điều khiển/check deadline.
+                async for chunk in response.aiter_bytes():
+                    if time.monotonic() - started >= timeout:
+                        raise AIProviderError(
+                            "Segmentation quá thời gian", "segmentation_timeout", retryable=True
+                        )
+                    if len(body) + len(chunk) > MAX_SEGMENTATION_RESPONSE_BYTES:
+                        raise AIProviderError(
+                            "Response segmentation quá lớn", "invalid_segmentation_output"
+                        )
+                    body.extend(chunk)
+                return body
+
+
 def _segment(worker, snapshot, image, mime, components, ledger, url):
     model = _optional_text(snapshot, "segmentation_model")
     timeout = snapshot.get("segmentation_timeout_seconds", 30)
@@ -175,28 +203,9 @@ def _segment(worker, snapshot, image, mime, components, ledger, url):
         started = time.monotonic()
         error_code = None
         try:
-            with httpx.Client(timeout=timeout, follow_redirects=False) as client:
-                with client.stream("POST", url, json=payload) as response:
-                    if response.status_code != 200:
-                        raise AIProviderError(
-                            "Dịch vụ segmentation trả lỗi",
-                            "segmentation_http_error",
-                            retryable=response.status_code in {408, 429}
-                            or response.status_code >= 500,
-                        )
-                    body = bytearray()
-                    for chunk in response.iter_bytes(chunk_size=64 * 1024):
-                        if time.monotonic() - started >= timeout:
-                            raise AIProviderError(
-                                "Segmentation quá thời gian", "segmentation_timeout", retryable=True
-                            )
-                        if len(body) + len(chunk) > MAX_SEGMENTATION_RESPONSE_BYTES:
-                            raise AIProviderError(
-                                "Response segmentation quá lớn", "invalid_segmentation_output"
-                            )
-                        body.extend(chunk)
+            body = asyncio.run(_fetch_segments(url, payload, timeout, started))
             return _validate_segments(body, len(components), source_size, max_bytes, max_pixels)
-        except httpx.TimeoutException as exc:
+        except (httpx.TimeoutException, TimeoutError) as exc:
             error_code = "segmentation_timeout"
             raise AIProviderError("Segmentation quá thời gian", error_code, retryable=True) from exc
         except httpx.RequestError as exc:

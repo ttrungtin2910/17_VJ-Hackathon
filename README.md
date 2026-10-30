@@ -157,6 +157,32 @@ Chi tiết: [API catalogue v2](docs/api-catalogue-v2.md),
 [báo cáo nghiệm thu A](docs/architecture/07-acceptance-stage-a.md),
 [ADR](docs/architecture/adr-001-deterministic-pipelines.md).
 
+## Recommendation — Chặng B
+
+Sau `alembic upgrade head` (bao gồm `20261031_0004`), API `/v1/recommendations`
+phối tối đa Top 3 từ garments **active thuộc user**, không tạo ảnh, không cần AI key.
+Context version 1 khớp frontend: Sự kiện + Phong cách bắt buộc, Thời tiết/Di chuyển tùy chọn.
+Location chỉ lưu bối cảnh thủ công, không tự lấy vị trí/thời tiết. Chưa tích hợp HTTP frontend.
+
+- Create session cần `Idempotency-Key`; cùng key/body trả cùng session và item IDs.
+- Tổ hợp bị giới hạn: 8 món/role, 512/template, tối đa 1024 tổ hợp; thiếu đồ trả lý do,
+  không bịa đủ 3. Có template áo+quần+giày hoặc váy liền+giày.
+- Typed edit chỉ thay một slot, giữ các món khác, kiểm tra `expected_revision` và locks.
+- Feedback PUT là latest signal, retry/flip không nhân mẫu. Snapshot feature/weights giữ lịch sử,
+  cap từng feature 3, tổng personalization 8. Không tự tăng wear_count từ like.
+- Hội thoại tùy chọn dùng `STYLIST_INTENT_MODEL` + OpenAI key đã xác minh; chỉ hiểu intent,
+  không tạo ảnh. Thiếu cấu hình trả 503 trước enqueue, không fallback ngầm.
+- Intent đi qua worker/audit/budget/consent/fencing và commit outfit cùng job status trong
+  một transaction. User locks và typed constraints không bị model bỏ qua.
+
+Contract/curl: [API recommendation](docs/api-recommendations.md).
+Nghiệm thu tổng: [A + B: 368 tests, PostgreSQL/S3/HTTP runtime](docs/architecture/08-acceptance-stage-b.md).
+
+Rollback B: ngừng nhận request/message mới và drain worker trước khi rollback app. Giữ các
+bảng additive và dữ liệu snapshot; không downgrade DB đang có sessions/feedback cần giữ.
+Rollback A: ngừng enqueue v2 bằng schema v1 và tắt optional stages tương ứng, drain jobs v2
+trước khi dùng worker không hỗ trợ v2. Không sửa snapshot job đang chạy.
+
 ## Giới hạn hiện tại
 
 - V2 nhận nhiều metadata component; không tự giả lập ảnh tách. Segmentation chỉ hoạt động khi

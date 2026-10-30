@@ -1,0 +1,23 @@
+[
+  {
+    "name": "Công sở ưu tiên nhãn formal có thật",
+    "context": {"version": 1, "event": {"id": "interview"}, "style": {"id": "formal", "source": "manual"}, "weather": null, "transports": []},
+    "wardrobe": [{"id": "a-casual", "category": "áo", "tags": ["casual"]}, {"id": "z-formal", "category": "shirt", "tags": ["formal"]}, {"id": "pants", "category": "quần"}, {"id": "shoes", "category": "giày"}],
+    "must_include": ["z-formal", "pants", "shoes"],
+    "must_exclude": ["a-casual"]
+  },
+  {
+    "name": "Mưa loại da lộn có bằng chứng, giữ giày chưa rõ chất liệu",
+    "context": {"version": 1, "event": {"id": "casual"}, "style": {"id": "casual", "source": "suggestion"}, "weather": {"id": "rainy"}, "transports": []},
+    "wardrobe": [{"id": "dress", "category": "váy liền"}, {"id": "a-suede", "category": "shoes", "material": "suede"}, {"id": "unknown-shoes", "category": "giày"}],
+    "must_include": ["dress", "unknown-shoes"],
+    "must_exclude": ["a-suede"]
+  },
+  {
+    "name": "Phản hồi latest điều chỉnh thứ hạng trong giới hạn",
+    "context": {"version": 1, "event": {"id": "other", "custom": "Đi dạo"}, "style": {"id": "other", "custom": "Tự chọn", "source": "manual"}, "weather": null, "transports": []},
+    "wardrobe": [{"id": "a-casual", "category": "top", "tags": ["casual"]}, {"id": "z-minimal", "category": "top", "tags": ["minimal"]}, {"id": "pants", "category": "bottom"}, {"id": "shoes", "category": "shoes"}],
+    "weights": {"style:minimal": 2, "style:casual": -2},
+    "must_include": ["z-minimal", "pants", "shoes"]
+  }
+]

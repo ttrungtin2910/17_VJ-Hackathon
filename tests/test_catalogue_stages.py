@@ -289,7 +289,7 @@ def segmentation(context, monkeypatch):
         kwargs=[],
         error=None,
     )
-    client_type = httpx.Client
+    client_type = httpx.AsyncClient
 
     def handler(request):
         # Ledger phải giữ reservation trước khi service nhận request.
@@ -311,7 +311,7 @@ def segmentation(context, monkeypatch):
         state.clients.append(client)
         return client
 
-    monkeypatch.setattr(stages.httpx, "Client", client_factory)
+    monkeypatch.setattr(stages.httpx, "AsyncClient", client_factory)
     return state
 
 
@@ -569,3 +569,49 @@ def test_full_pipeline_segments_final_escalation_candidates(context, segmentatio
     assert analysis.metadata["human_review_required"] is True
     assert screening.closed and expert.closed
     assert not context.primary.closed
+
+
+@pytest.mark.parametrize("slow_headers", [False, True])
+def test_absolute_segmentation_deadline_cancels_headers_and_trickle_body(
+    context, monkeypatch, slow_headers
+):
+    import asyncio
+
+    context.primary.outcome = result(count=2)
+    context.claim.ref.update(
+        segmentation_url="http://segmenter.test/segment",
+        segmentation_model="verified-test",
+        segmentation_timeout_seconds=0.03,
+    )
+    consumed = []
+    closed = []
+
+    class Trickle(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            for index in range(1000):
+                await asyncio.sleep(0.005)
+                consumed.append(index)
+                yield b"x"
+
+        async def aclose(self):
+            closed.append(True)
+
+    async def handler(request):
+        if slow_headers:
+            await asyncio.sleep(0.2)
+        return httpx.Response(200, stream=Trickle())
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        stages.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs),
+    )
+    with pytest.raises(AIProviderError) as error:
+        run(context)
+    assert error.value.code == "segmentation_timeout"
+    assert error.value.retryable
+    assert len(consumed) < 100  # Không đợi buffer 64 KiB hoặc EOF 1.000 chunks.
+    if not slow_headers:
+        assert closed
+    assert context.ledger.results[-1][-1] == "segmentation_timeout"

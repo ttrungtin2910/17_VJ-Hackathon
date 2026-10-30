@@ -37,10 +37,20 @@ def new_snapshot(settings: Settings, provider: str, kind: str) -> dict:
         ref["image_model"] = settings.openai_image_model
     if kind == "catalogue":
         version = settings.catalogue_schema_version
+        screening_model = (
+            settings.fpt_screening_model
+            if provider == "fpt"
+            else settings.catalogue_screening_model
+        )
+        escalation_model = (
+            settings.fpt_escalation_model
+            if provider == "fpt"
+            else settings.catalogue_escalation_model
+        )
         if version != 2 and any(
             (
-                settings.catalogue_screening_model,
-                settings.catalogue_escalation_model,
+                screening_model,
+                escalation_model,
                 settings.catalogue_segmentation_url,
             )
         ):
@@ -64,8 +74,8 @@ def new_snapshot(settings: Settings, provider: str, kind: str) -> dict:
                 provider == "openai" and settings.catalogue_native_structured_output
             ),
             supports_temperature=settings.catalogue_supports_temperature,
-            screening_model=settings.catalogue_screening_model,
-            escalation_model=settings.catalogue_escalation_model,
+            screening_model=screening_model,
+            escalation_model=escalation_model,
             segmentation_url=settings.catalogue_segmentation_url,
             segmentation_model=settings.catalogue_segmentation_model,
             segmentation_timeout_seconds=settings.catalogue_segmentation_timeout_seconds,

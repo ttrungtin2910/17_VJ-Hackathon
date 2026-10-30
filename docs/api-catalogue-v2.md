@@ -73,6 +73,8 @@ accuracy chưa có dữ liệu đo trả null; latency không bao gồm queue wa
 
 Các env optional xem `.env.example`; mặc định tắt. Screening/escalation dùng model đã xác
 minh trên **cùng provider request đã chọn**. Snapshot pin các model/limits, không fallback.
+OpenAI dùng `CATALOGUE_SCREENING_MODEL`/`CATALOGUE_ESCALATION_MODEL`; FPT dùng
+`FPT_SCREENING_MODEL`/`FPT_ESCALATION_MODEL` riêng, không gửi model ID chéo provider.
 Screening chỉ phân image relevance, dùng schema catalogue v2; không thay file validation
 hoặc một safety moderation service. Escalation không bỏ bước human review.
 
@@ -95,6 +97,10 @@ Phải trả đủ indices, không trùng; mask PNG cùng kích thước ảnh n
 ngữ nghĩa. Worker lưu component/mask assets riêng, `parent_asset_id` trỏ ảnh gốc; component
 metadata liên kết mask, candidate/garment trỏ `component_asset_id`. Khi không có service,
 component dùng ảnh gốc và ID asset tách là null.
+
+HTTP segmentation có absolute timeout bao phủ connect/headers/body; stream nhỏ giọt bị hủy
+không đợi đủ buffer. Provider SDK calls vẫn có I/O timeouts riêng và job deadline recheck
+trước dispatch/publish, không có khả năng thu hồi request đã gửi hoặc hoàn lại phí upstream.
 
 S3 writes không atomic cùng SQL. Claim có prefix riêng để worker cũ không overwrite; crash
 có thể tạo orphan. Đối soát DB references trước dọn storage, không lifecycle-xóa cả prefix.

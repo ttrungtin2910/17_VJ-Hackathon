@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import (
@@ -26,7 +26,7 @@ def new_id() -> str:
 
 
 def now_utc() -> datetime:
-    return datetime.now().astimezone()
+    return datetime.now(timezone.utc)
 
 
 JsonType = JSON().with_variant(JSONB(), "postgresql")
@@ -261,3 +261,7 @@ class TasteMatch(Timestamped, Base):
     )
     similarity_score: Mapped[float] = mapped_column(Numeric(5, 4), nullable=False)
     status: Mapped[str] = mapped_column(String(30), default="new", nullable=False)
+
+
+# Đăng ký metadata cho Alembic/create_all, không ghép recommendation vào Look.
+from garblo.recommendations import models as recommendation_models  # noqa: E402,F401

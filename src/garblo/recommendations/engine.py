@@ -168,6 +168,11 @@ def complete(items: list[GarmentSnapshot], context: RecommendationContext) -> bo
 def matches_constraints(item: GarmentSnapshot, constraints: EditConstraints | None) -> bool:
     if constraints is None:
         return True
+    uncertain = set(item.details.get("uncertain_fields", []))
+    if constraints.colors and "color" in uncertain:
+        return False
+    if constraints.materials and "material" in uncertain:
+        return False
     return (
         (not constraints.colors or color_key(item.color) in map(color_key, constraints.colors))
         and (
@@ -212,7 +217,11 @@ def score_outfit(
         if shoes and has_cue(evidence(shoes), ("sneakers", "flat", "de bang", "the thao")):
             context_score = min(20.0, context_score + 3)
     style_score = 20.0 if context.style.id in styles else 0.0
-    colors = {color_key(item.color) for item in items if item.color}
+    colors = {
+        color_key(item.color)
+        for item in items
+        if item.color and "color" not in item.details.get("uncertain_fields", [])
+    }
     neutral = {"black", "white", "gray", "beige", "navy", "brown"}
     color_score = 0.0 if not colors else (15.0 if len(colors - neutral) <= 1 else 6.0)
     weather_score = 0.0
@@ -301,23 +310,30 @@ def recommend(
                 candidates.append(score_outfit(items, context, weights))
     selected = []
     while candidates and len(selected) < 3:
+
         def diversity_key(candidate):
             ids = set(candidate.stable_key)
             overlap = max(
-                (len(ids & set(old.stable_key)) / len(ids | set(old.stable_key)) for old in selected),
+                (
+                    len(ids & set(old.stable_key)) / len(ids | set(old.stable_key))
+                    for old in selected
+                ),
                 default=0,
             )
             return (-(candidate.score - 12 * overlap), candidate.stable_key)
 
         best = min(candidates, key=diversity_key)
         selected.append(best)
-        candidates = [candidate for candidate in candidates if candidate.stable_key != best.stable_key]
+        candidates = [
+            candidate for candidate in candidates if candidate.stable_key != best.stable_key
+        ]
     missing = []
     reason = None
     if not selected:
-        options = [[role for role in roles if not pools[role]] for roles in (
-            ("top", "bottom", "shoes"), ("dress", "shoes")
-        )]
+        options = [
+            [role for role in roles if not pools[role]]
+            for roles in (("top", "bottom", "shoes"), ("dress", "shoes"))
+        ]
         missing = min(options, key=lambda values: (len(values), tuple(values)))
         reason = "Chưa đủ món phù hợp để tạo bộ hoàn chỉnh từ tủ đồ hiện tại."
     elif len(selected) < 3:

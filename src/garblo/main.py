@@ -7,6 +7,8 @@ from fastapi.responses import FileResponse
 
 from garblo.api.routes import router
 from garblo.config import get_settings
+from garblo.recommendations.conversation_routes import router as conversation_router
+from garblo.recommendations.routes import router as recommendation_router
 
 settings = get_settings()
 app = FastAPI(title=settings.app_name, version="0.1.0")
@@ -18,6 +20,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(router, prefix=settings.api_v1_prefix)
+app.include_router(recommendation_router, prefix=settings.api_v1_prefix)
+app.include_router(conversation_router, prefix=settings.api_v1_prefix)
 
 
 @app.get("/health", tags=["system"])
