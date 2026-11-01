@@ -9,10 +9,15 @@ password_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 def hash_password(password: str) -> str:
+    if len(password.encode("utf-8")) > 72:
+        raise ValueError("Mật khẩu không được vượt quá 72 byte UTF-8")
     return password_context.hash(password)
 
 
 def verify_password(password: str, password_hash: str) -> bool:
+    # bcrypt cũ âm thầm cắt suffix; không chấp nhận password đã bị cắt.
+    if len(password.encode("utf-8")) > 72:
+        return False
     return password_context.verify(password, password_hash)
 
 

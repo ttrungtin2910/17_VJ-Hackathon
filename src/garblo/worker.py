@@ -15,13 +15,14 @@ from garblo.ai import AIProviderError, RenderedLook
 from garblo.ai_providers import ProviderRegistry
 from garblo.ai_providers.contracts import Analysis
 from garblo.catalogue.budget import CallLedger
+from garblo.catalogue.fallback import execution_claim
 from garblo.catalogue.quality import assess_quality
 from garblo.catalogue.stages import run_analysis_stages
 from garblo.config import Settings, get_settings
 from garblo.consent import active_ai_consent
 from garblo.database import SessionLocal
 from garblo.images import sanitize_image
-from garblo.jobs import ensure_job_configuration
+from garblo.jobs import attempt_limit, ensure_job_configuration
 from garblo.models import (
     AiJob,
     ApprovalRequest,
@@ -104,7 +105,7 @@ class JobWorker:
             )
         )
         for job in expired:
-            failed = job.attempts >= self.settings.worker_max_attempts
+            failed = job.attempts >= attempt_limit(self.settings, job.input_ref)
             job.status = "failed" if failed else "queued"
             job.lock_token = job.locked_at = None
             job.next_attempt_at = None
@@ -129,7 +130,7 @@ class JobWorker:
         if not job:
             self.db.rollback()
             return None
-        if job.attempts >= self.settings.worker_max_attempts:
+        if job.attempts >= attempt_limit(self.settings, job.input_ref):
             job.status = "failed"
             job.error_code, job.error_message = "retry_limit_exceeded", "Đã hết số lần xử lý"
             job.completed_at = utcnow()
@@ -181,19 +182,32 @@ class JobWorker:
         )
         provider = None
         ledger = None
+        effective = claim
         try:
-            ensure_job_configuration(self.settings, claim.provider, claim.ref, claim.job_type)
+            effective = execution_claim(self, claim)
+            ensure_job_configuration(
+                self.settings, effective.provider, effective.ref, effective.job_type
+            )
             provider = self.providers.resolve(
-                claim.provider, claim.ref["model"], claim.ref.get("image_model")
+                effective.provider, effective.ref["model"], effective.ref.get("image_model")
             )
             if claim.job_type == "catalogue":
                 ledger = CallLedger(self, claim)
+                ledger.provider = effective.provider
                 configure = getattr(provider, "configure_catalogue", None)
                 if configure:
-                    configure(claim.ref)
+                    configure(effective.ref)
                 provider.on_result = ledger.on_result
                 provider.on_validation = ledger.on_validation
-                result = self._analyze(claim, provider, ledger)
+                result = self._analyze(effective, provider, ledger)
+                result = Analysis(
+                    result.result,
+                    {
+                        **result.metadata,
+                        "effective_provider": effective.provider,
+                        "effective_model": effective.ref["model"],
+                    },
+                )
                 ledger.finish_unknown()
                 ledger.ensure_deadline()
                 if getattr(result.result, "schema_version", 1) != claim.ref.get(
@@ -238,8 +252,8 @@ class JobWorker:
             logger.info(
                 "AI job=%s provider=%s model=%s status=succeeded",
                 claim.id,
-                claim.provider,
-                claim.ref["model"],
+                effective.provider,
+                effective.ref["model"],
             )
         except Exception as exc:
             self.db.rollback()
@@ -251,10 +265,14 @@ class JobWorker:
             if ledger:
                 ledger.finish_unknown(error.code)
             # Không ghi traceback/raw exception: có thể chứa body, prompt, key hoặc signed URL.
-            logger.warning("AI job=%s provider=%s code=%s", claim.id, claim.provider, error.code)
+            logger.warning(
+                "AI job=%s provider=%s code=%s", claim.id, effective.provider, error.code
+            )
             job = self._owned_claim(claim, lock=True)
             if job:
-                retry = error.retryable and job.attempts < self.settings.worker_max_attempts
+                retry = error.retryable and job.attempts < attempt_limit(
+                    self.settings, job.input_ref
+                )
                 job.status = "queued" if retry else "failed"
                 job.error_code, job.error_message = error.code, str(error)
                 job.completed_at = None if retry else utcnow()
@@ -359,6 +377,8 @@ class JobWorker:
             "result": "candidates" if ids else "no_items",
             "provider": claim.provider,
             "model": claim.ref["model"],
+            "effective_provider": analysis.metadata.get("effective_provider", claim.provider),
+            "effective_model": analysis.metadata.get("effective_model", claim.ref["model"]),
             "analysis_model": analysis.metadata.get("analysis_model", claim.ref["model"]),
             "latency_ms": analysis.metadata.get("latency_ms"),
             "usage": self._safe_usage(analysis.metadata.get("usage")),
@@ -517,6 +537,8 @@ class JobWorker:
 
 
 def run() -> None:
+    from garblo.local_runtime import write_heartbeat
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     # SDK debug logs có thể chứa URL/token; không bật chúng qua cấu hình ứng dụng.
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -526,11 +548,14 @@ def run() -> None:
     providers = ProviderRegistry(settings)
     while True:
         try:
+            write_heartbeat("busy")
             with SessionLocal() as db:
                 processed = JobWorker(db, storage, providers, settings).process_next()
+            write_heartbeat("idle")
             if not processed:
                 time.sleep(2)
         except Exception:
+            write_heartbeat("failed")
             logger.error("Worker không kết nối được runtime; thử lại sau 5 giây")
             time.sleep(5)
 

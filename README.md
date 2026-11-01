@@ -198,3 +198,6 @@ trước khi dùng worker không hỗ trợ v2. Không sửa snapshot job đang 
   S3 và DB không có distributed transaction: crash có thể để lại object chưa được DB tham chiếu;
   cần đối soát orphan trước khi xóa, không áp lifecycle xóa toàn bộ generated prefix.
 - Live OpenAI/FPT và AWS chỉ được xác nhận khi có evidence riêng, không suy từ test mock.
+# Bổ sung local WSL — policy catalogue
+
+`CATALOGUE_FPT_FALLBACK_ENABLED` mặc định `false`. Bật cùng FPT key chỉ ảnh hưởng job catalogue OpenAI **mới**: snapshot provider/model fallback (không key), tối đa hai worker attempts OpenAI, attempt thứ ba FPT sau hai lỗi vision transient có audit. Cap gốc <3 không tăng; có policy thì cap tối đa 3, đồng thời vẫn chịu call/token/deadline/consent/lease. Không fallback vì auth/billing/safety/schema/input/consent; không fallback render/intent/legacy/explicit FPT. Thiếu FPT key giữ OpenAI-only và cảnh báo một lần mỗi process. Native structured output của FPT luôn tắt; Pydantic validate cùng schema. `job.model_provider`/snapshot vẫn là provider yêu cầu; output có `effective_provider/effective_model`, physical-call ledger ghi provider/model thực. Unit/provider giả không chứng minh wire-live.

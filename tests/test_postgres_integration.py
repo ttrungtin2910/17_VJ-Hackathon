@@ -104,6 +104,108 @@ def test_postgres_migration_flow_and_concurrent_commit(
     assert len(client.get("/v1/garments?tags=casual&category=shirt", headers=headers).json()) == 1
 
 
+def test_postgres_concurrent_upload_has_one_logical_asset(postgres_runtime, image_bytes):
+    from garblo.models import MediaAsset, UploadOperation
+    from tests.test_upload_recovery import keyed_upload
+
+    runtime = postgres_runtime
+    headers = auth_headers(runtime.client)
+    barrier = Barrier(2)
+
+    def send():
+        barrier.wait(timeout=10)
+        return keyed_upload(runtime.client, headers, image_bytes)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(send) for _ in range(2)]
+        responses = [future.result(timeout=20) for future in futures]
+    assert all(response.status_code in {201, 409} for response in responses)
+    assert any(response.status_code == 201 for response in responses)
+    replay = keyed_upload(runtime.client, headers, image_bytes)
+    assert replay.status_code == 201
+    assert all(
+        response.json()["id"] == replay.json()["id"]
+        for response in responses
+        if response.status_code == 201
+    )
+    with runtime.factory() as db:
+        assert db.scalar(select(func.count()).select_from(MediaAsset)) == 1
+        assert db.scalar(select(func.count()).select_from(UploadOperation)) == 1
+
+
+def test_postgres_upload_recovers_storage_write_before_db_crash(
+    postgres_runtime, image_bytes, storage, monkeypatch
+):
+    from garblo.models import MediaAsset, UploadOperation
+    from tests.test_upload_recovery import KEY, keyed_upload
+
+    runtime = postgres_runtime
+    headers = auth_headers(runtime.client)
+    put = storage.put_bytes
+
+    def crash(key, body, mime):
+        with runtime.factory() as db:
+            assert db.scalar(select(func.count()).select_from(MediaAsset)) == 0
+            # Đã commit reservation và không giữ khóa trong khi ghi S3.
+            db.execute(text("SET LOCAL lock_timeout = '1s'"))
+            op = db.scalar(select(UploadOperation).with_for_update())
+            assert op.status == "pending" and op.asset_id is None
+        put(key, body, mime)
+        raise SystemExit("Mô phỏng process chết sau khi S3 ghi")
+
+    monkeypatch.setattr(storage, "put_bytes", crash)
+    # Gọi service trực tiếp để không làm chết event loop TestClient.
+    from garblo.images import sanitize_image
+    from garblo.uploads import upload_with_key
+
+    body, mime = sanitize_image(image_bytes, 10 * 1024 * 1024, 25_000_000)
+    with runtime.factory() as db:
+        user_id = runtime.client.get("/v1/me", headers=headers).json()["id"]
+        with pytest.raises(SystemExit):
+            upload_with_key(db, user_id, KEY, body, mime, "garment_photo", storage)
+    with runtime.factory() as db:
+        op = db.scalar(select(UploadOperation))
+        reserved_id = op.reserved_asset_id
+        op.lease_expires_at = utcnow() - timedelta(seconds=1)
+        db.commit()
+    monkeypatch.setattr(storage, "put_bytes", put)
+    response = keyed_upload(runtime.client, headers, image_bytes)
+    assert response.status_code == 201 and response.json()["id"] == reserved_id
+    assert len(storage.objects) == 1
+
+
+def test_postgres_upload_old_lease_cannot_publish(postgres_runtime, image_bytes, storage):
+    from garblo.images import sanitize_image
+    from garblo.models import MediaAsset, UploadOperation
+    from garblo.uploads import upload_with_key
+    from tests.test_upload_recovery import KEY
+
+    runtime = postgres_runtime
+    headers = auth_headers(runtime.client)
+    user_id = runtime.client.get("/v1/me", headers=headers).json()["id"]
+    body, mime = sanitize_image(image_bytes, 10 * 1024 * 1024, 25_000_000)
+
+    class SlowWriter:
+        def put_bytes(self, key, data, content_type):
+            with runtime.factory() as second:
+                op = second.scalar(select(UploadOperation))
+                op.lease_expires_at = utcnow() - timedelta(seconds=1)
+                second.commit()
+                upload_with_key(second, user_id, KEY, body, mime, "garment_photo", storage)
+            storage.put_bytes(key, data, content_type)
+
+    from fastapi import HTTPException
+
+    with runtime.factory() as first:
+        with pytest.raises(HTTPException) as error:
+            upload_with_key(first, user_id, KEY, body, mime, "garment_photo", SlowWriter())
+    assert error.value.status_code == 409
+    assert error.value.detail["code"] == "upload_lease_lost"
+    with runtime.factory() as db:
+        assert db.scalar(select(func.count()).select_from(MediaAsset)) == 1
+        assert db.scalar(select(UploadOperation)).status == "completed"
+
+
 def test_postgres_skip_locked_and_reclaim_fences_old_worker(
     postgres_runtime, image_bytes, storage, providers, settings
 ):

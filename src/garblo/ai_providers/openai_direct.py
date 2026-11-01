@@ -34,6 +34,7 @@ class OpenAIDirectProvider:
             raise AIProviderError("OpenAI chưa được cấu hình", "provider_not_configured")
         self.model, self.image_model = model, image_model
         self.catalogue_options = CatalogueOptions()
+        self._has_fallback_policy = False
         self.on_result: ResultHook | None = None
         self.on_validation: ValidationHook | None = None
         self._owns_client = client is None
@@ -49,6 +50,7 @@ class OpenAIDirectProvider:
 
     def configure_catalogue(self, snapshot: Mapping[str, Any]) -> None:
         self.catalogue_options = CatalogueOptions.from_snapshot(snapshot, default_tokens=2048)
+        self._has_fallback_policy = bool(snapshot.get("vision_fallback"))
 
     def close(self) -> None:
         if self._owns_client:
@@ -75,7 +77,20 @@ class OpenAIDirectProvider:
                     raise AIProviderError("OpenAI không hoàn tất nội dung", "invalid_model_output")
                 content = choice.message.content
             except APIStatusError as exc:
-                raise upstream_error(exc.status_code) from exc
+                error_code = exc.code or exc.type
+                error = upstream_error(exc.status_code, error_code)
+                if (
+                    catalogue
+                    and self._has_fallback_policy
+                    and exc.status_code == 429
+                    and error.retryable
+                    and error_code != "rate_limit_exceeded"
+                ):
+                    # Thiếu mã rate-limit đã biết không phải quyền gửi ảnh sang FPT.
+                    error = AIProviderError(
+                        "Cần kiểm tra quota/billing của OpenAI", "provider_rate_limit_unknown"
+                    )
+                raise error from exc
             except APIConnectionError as exc:
                 raise upstream_error() from exc
             except (IndexError, AttributeError, TypeError, ValueError) as exc:
@@ -204,7 +219,7 @@ class OpenAIDirectProvider:
                 if not image:
                     raise ValueError("empty image")
             except APIStatusError as exc:
-                raise upstream_error(exc.status_code) from exc
+                raise upstream_error(exc.status_code, exc.code or exc.type) from exc
             except APIConnectionError as exc:
                 raise upstream_error() from exc
             except (ValueError, TypeError, IndexError, AttributeError) as exc:

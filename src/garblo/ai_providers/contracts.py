@@ -204,7 +204,16 @@ def parse_analysis(content: Any, schema_version: int = 1) -> AnalysisResult | An
         raise AIProviderError("Kết quả model sai schema", "invalid_model_output") from exc
 
 
-def upstream_error(status: int | None = None) -> AIProviderError:
+def upstream_error(status: int | None = None, code: str | None = None) -> AIProviderError:
+    # Chỉ đọc mã lỗi định danh, không log/persist raw provider body.
+    if code in {"insufficient_quota", "billing_hard_limit_reached", "billing_not_active"}:
+        return AIProviderError("Provider yêu cầu kiểm tra billing/quota", "provider_billing_error")
+    if code in {"invalid_api_key", "account_deactivated"}:
+        return AIProviderError("Nhà cung cấp từ chối xác thực", "provider_auth_error")
+    if code in {"content_policy_violation", "content_filter", "safety_violation"}:
+        return AIProviderError("Provider từ chối xử lý ảnh", "provider_refused")
+    if code in {"model_not_found", "invalid_request_error"}:
+        return AIProviderError("Cấu hình/yêu cầu provider không hợp lệ", "provider_request_error")
     if status in {401, 403}:
         return AIProviderError("Nhà cung cấp từ chối xác thực", "provider_auth_error")
     if status in {408, 429} or (status is not None and status >= 500) or status is None:

@@ -1,0 +1,18 @@
+# Harness opt-in riêng cho test: không có AI key thật, inference MOCKED.
+services:
+  postgres:
+    ports: ['127.0.0.1:25440:5432']
+  api:
+    command: [python, /app/tests/controlled_runtime.py, api]
+    volumes: ['../tests:/app/tests:ro']
+    environment:
+      OPENAI_API_KEY: ''
+      FPT_VLM_API_KEY: ''
+      AZURE_OPENAI_API_KEY: ''
+  worker:
+    command: [python, /app/tests/controlled_runtime.py, worker]
+    volumes: ['../tests:/app/tests:ro']
+    environment:
+      OPENAI_API_KEY: ''
+      FPT_VLM_API_KEY: ''
+      AZURE_OPENAI_API_KEY: ''

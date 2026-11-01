@@ -1,5 +1,6 @@
 """Audit riêng từng request; không hứa exactly-once billing khi provider timeout."""
 
+import logging
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -7,6 +8,8 @@ from sqlalchemy import select
 
 from garblo.ai import AIProviderError
 from garblo.models import AiCallAttempt, AiJob
+
+logger = logging.getLogger(__name__)
 
 
 class CallLedger:
@@ -105,6 +108,17 @@ class CallLedger:
                 call.validation_status = "invalid"
                 self.repair_stage = self.stage
             db.commit()
+            logger.info(
+                "AI call=%s job=%s provider=%s model=%s attempt=%s stage=%s latency_ms=%s status=%s",
+                call.id,
+                call.job_id,
+                call.provider,
+                call.model,
+                call.worker_attempt,
+                call.stage,
+                call.latency_ms,
+                call.status,
+            )
         self.last_id, self.pending_id = self.pending_id, None
 
     def on_validation(self, error_code=None):

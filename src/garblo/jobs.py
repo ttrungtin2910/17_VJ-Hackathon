@@ -1,7 +1,18 @@
+import logging
 from datetime import datetime, timezone
 
 from garblo.ai import AIProviderError
 from garblo.config import Settings
+
+logger = logging.getLogger(__name__)
+_missing_fpt_warned = False
+
+
+def attempt_limit(settings: Settings, ref: dict) -> int:
+    maximum = ref.get("max_attempts", settings.worker_max_attempts)
+    if type(maximum) is not int or maximum < 1:
+        maximum = settings.worker_max_attempts
+    return min(maximum, settings.worker_max_attempts)
 
 
 def ensure_job_configuration(settings: Settings, provider: str, ref: dict, kind: str) -> None:
@@ -60,6 +71,7 @@ def new_snapshot(settings: Settings, provider: str, kind: str) -> dict:
         if settings.catalogue_segmentation_url and not settings.catalogue_segmentation_model:
             raise AIProviderError("Segmentation thiếu model đã xác minh", "provider_not_configured")
         ref.update(
+            max_attempts=settings.worker_max_attempts,
             schema_version=version,
             prompt_version=f"catalogue-v{version}",
             pipeline_version=f"catalogue-v{version}",
@@ -80,5 +92,23 @@ def new_snapshot(settings: Settings, provider: str, kind: str) -> dict:
             segmentation_model=settings.catalogue_segmentation_model,
             segmentation_timeout_seconds=settings.catalogue_segmentation_timeout_seconds,
         )
+        if provider == "openai" and settings.catalogue_fpt_fallback_enabled:
+            if settings.fpt_vlm_api_key:
+                # Chính sách local tối đa 2 attempts primary + attempt 3 fallback;
+                # không tăng cap thấp hơn, không snapshot credential.
+                ref["max_attempts"] = min(settings.worker_max_attempts, 3)
+                ref["vision_fallback"] = {
+                    "version": 1,
+                    "provider": "fpt",
+                    "model": settings.fpt_vlm_model,
+                    "primary_attempts": 2,
+                    "screening_model": settings.fpt_screening_model,
+                    "escalation_model": settings.fpt_escalation_model,
+                }
+            else:
+                global _missing_fpt_warned
+                if not _missing_fpt_warned:
+                    logger.warning("Thiếu FPT key: catalogue giữ OpenAI-only trong budget gốc")
+                    _missing_fpt_warned = True
     ensure_job_configuration(settings, provider, ref, kind)
     return ref

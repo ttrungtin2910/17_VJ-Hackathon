@@ -150,3 +150,19 @@ mới dùng `{detail:{code,message}}`. FE nên đọc cả hai, không hiển th
 
 Live QA phải ghi ngày/model/endpoint/HTTP/job ID/latency, dùng ảnh được phép xử lý;
 không đưa key, ảnh, Base64 hoặc signed URL vào báo cáo.
+# Bổ sung contract local WSL (01/11/2026)
+
+- Register giữ JSON hiện hữu, mật khẩu 12–128 ký tự và **tối đa 72 byte UTF-8**. Login vượt 72 byte trả 401 an toàn; không verify prefix bị bcrypt cắt, không thay hash cũ. User legacy dùng mật khẩu dài cần quy trình đổi mật khẩu ngoài slice này; không tự chuyển hash.
+- `GET /v1/me/consents/latest?purpose=ai_processing`: Bearer, chỉ owner; trả `ConsentResponse | null`, bao gồm bản mới nhất **đã revoked**, không phục hồi grant cũ. Không tự cấp consent khi login/bootstrap.
+- `DELETE /v1/consents/{id}` giữ 204 và gọi lặp được; ID của người khác trả 404.
+- Policy `local-wsl-1` là nhãn thử nghiệm local: cho phép gửi ảnh đã chọn tới provider để phân loại quần áo; chưa phải chính sách production được phê duyệt. Thu hồi ngăn xử lý tại checkpoint tiếp theo, không cam kết hủy request upstream đang chạy, xóa dữ liệu provider hoặc tuyến tính hóa revoke/publish; URL ký đã cấp còn hiệu lực đến hết hạn.
+- Lỗi validation 422 chỉ trả `type/loc/msg`; không phản chiếu password hay request input.
+
+## Recovery upload/catalogue local
+
+- `POST /v1/assets`: multipart hiện hữu, optional `Idempotency-Key` (1–128 ký tự `A-Za-z0-9._:-`); client real phải gửi. Cùng owner/key/asset_type/ảnh normalized trả lại asset ID cũ (201); khác nội dung trả 409 `idempotency_conflict`. Keyed upload không dùng checksum-dedup tùy chọn để gộp operation khác.
+- Reservation commit trước network S3; lease 300 giây, cùng object key/asset ID qua retry. Pending còn lease trả 409 `upload_in_progress`; failed hoặc lease hết hạn có thể gửi lại **đúng file/key**. Upload cũ mất lease không publish (`upload_lease_lost`). Không giữ DB transaction qua S3 write, không hứa exactly-once object write; crash có thể còn orphan, không tự xóa.
+- `GET /v1/assets/by-request/{request_key}`: owner-only `{request_key,status: pending|completed|failed,asset_id: string|null}`. Pending/failed không phải bằng chứng đã có asset. 404 nếu chưa có hoặc thuộc user khác.
+- `GET /v1/assets/{asset_id}`: `AssetResponse` hiện hữu, owner-only.
+- `GET /v1/assets/{asset_id}/jobs`: `JobResponse[]`, chỉ catalogue đúng owner/source; chưa enqueue trả `[]`. Nhiều job không phân biệt được trả 409 `ambiguous_catalogue_jobs`, không chọn newest và không expose `input_ref`.
+- Mất response 202 sau catalogize: tra jobs đúng asset; retry failed dùng `POST /v1/jobs/{job_id}/retry` hiện hữu, không reupload hoặc enqueue job mới.

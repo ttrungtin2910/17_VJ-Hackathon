@@ -9,6 +9,7 @@ from fastapi import (
     Depends,
     File,
     Form,
+    Header,
     HTTPException,
     Query,
     Response,
@@ -23,11 +24,11 @@ from garblo.ai import AIProviderError
 from garblo.ai_providers.contracts import GarmentAttributes
 from garblo.catalogue.metrics import summarize_catalogue
 from garblo.config import Settings, get_settings
-from garblo.consent import active_ai_consent
+from garblo.consent import active_ai_consent, latest_consent
 from garblo.database import get_db
 from garblo.dependencies import get_current_user, require_ai_configuration
 from garblo.images import sanitize_image
-from garblo.jobs import ensure_job_configuration, new_snapshot
+from garblo.jobs import attempt_limit, ensure_job_configuration, new_snapshot
 from garblo.models import (
     AiCallAttempt,
     AiJob,
@@ -40,6 +41,7 @@ from garblo.models import (
     LookItem,
     MediaAsset,
     StyleSignal,
+    UploadOperation,
     User,
     new_id,
 )
@@ -69,11 +71,13 @@ from garblo.schemas import (
     LookResponse,
     RegisterRequest,
     TokenResponse,
+    UploadOperationResponse,
     UserResponse,
     VariationRequest,
 )
 from garblo.security import create_access_token, hash_password, verify_password
 from garblo.storage import ObjectStorage, StorageUnavailable, storage_key
+from garblo.uploads import upload_with_key
 
 router = APIRouter()
 DB = Annotated[Session, Depends(get_db)]
@@ -171,6 +175,15 @@ def ai_metrics(db: DB, user: CurrentUser):
     return summarize_catalogue(db, user.id)
 
 
+@router.get("/me/consents/latest", response_model=ConsentResponse | None)
+def get_latest_consent(
+    db: DB,
+    user: CurrentUser,
+    purpose: Annotated[str, Query(min_length=2, max_length=80)] = "ai_processing",
+) -> ConsentRecord | None:
+    return latest_consent(db, user.id, purpose)
+
+
 @router.delete("/consents/{consent_id}", status_code=status.HTTP_204_NO_CONTENT)
 def revoke_consent(consent_id: str, db: DB, user: CurrentUser) -> Response:
     consent = db.scalar(
@@ -193,6 +206,9 @@ def upload_asset(
     file: UploadFile = File(...),
     asset_type: str = Form("garment_photo"),
     settings: Settings = Depends(get_settings),
+    idempotency_key: Annotated[
+        str | None, Header(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
+    ] = None,
 ) -> MediaAsset:
     # Decode ảnh, S3 và SQLAlchemy đều sync: để FastAPI chạy route trong threadpool.
     body = file.file.read(settings.max_upload_bytes + 1)
@@ -205,6 +221,10 @@ def upload_asset(
     except ValueError as exc:
         raise HTTPException(status_code=415, detail=str(exc)) from exc
     checksum = hashlib.sha256(body).hexdigest()
+    if idempotency_key is not None:
+        return upload_with_key(
+            db, user.id, idempotency_key, body, mime_type, asset_type, storage_or_503(settings)
+        )
     if settings.catalogue_deduplicate_uploads:
         # Cùng user dùng cùng khóa để serialize cả trường hợp chưa có checksum nào.
         db.execute(select(User.id).where(User.id == user.id).with_for_update())
@@ -253,6 +273,46 @@ def list_assets(db: DB, user: CurrentUser) -> list[MediaAsset]:
             .order_by(MediaAsset.created_at.desc())
         )
     )
+
+
+@router.get("/assets/by-request/{request_key}", response_model=UploadOperationResponse)
+def get_upload_operation(request_key: str, db: DB, user: CurrentUser) -> UploadOperation:
+    operation = db.scalar(
+        select(UploadOperation).where(
+            UploadOperation.user_id == user.id, UploadOperation.request_key == request_key
+        )
+    )
+    if not operation:
+        raise HTTPException(status_code=404, detail="Không tìm thấy upload operation")
+    return operation
+
+
+@router.get("/assets/{asset_id}", response_model=AssetResponse)
+def get_asset(asset_id: str, db: DB, user: CurrentUser) -> MediaAsset:
+    return get_owned_asset_or_404(db, user.id, asset_id)
+
+
+@router.get("/assets/{asset_id}/jobs", response_model=list[JobResponse])
+def get_asset_jobs(asset_id: str, db: DB, user: CurrentUser) -> list[JobResponse]:
+    get_owned_asset_or_404(db, user.id, asset_id)
+    jobs = list(
+        db.scalars(
+            select(AiJob).where(
+                AiJob.user_id == user.id,
+                AiJob.job_type == "catalogue",
+                AiJob.input_ref["asset_id"].as_string() == asset_id,
+            )
+        )
+    )
+    if len(jobs) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "ambiguous_catalogue_jobs", "message": "Nguồn có nhiều job catalogue"},
+        )
+    return [
+        JobResponse.model_validate(job).model_copy(update={"model": job.input_ref.get("model")})
+        for job in jobs
+    ]
 
 
 @router.get("/assets/{asset_id}/download", response_model=AssetDownloadResponse)
@@ -633,7 +693,7 @@ def retry_job(
         raise HTTPException(status_code=404, detail="Job not found")
     if job.status != "failed":
         raise HTTPException(status_code=409, detail="Only failed jobs can be retried")
-    if job.attempts >= settings.worker_max_attempts:
+    if job.attempts >= attempt_limit(settings, job.input_ref):
         raise HTTPException(
             status_code=409,
             detail={"code": "retry_limit_exceeded", "message": "Đã hết số lần xử lý cho job"},

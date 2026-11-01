@@ -9,7 +9,8 @@ from garblo.storage import ObjectStorage
 
 
 def run() -> None:
-    storage = ObjectStorage(get_settings())
+    settings = get_settings()
+    storage = ObjectStorage(settings)
     for attempt in range(30):
         try:
             try:
@@ -28,6 +29,21 @@ def run() -> None:
                 )
                 storage._client.create_bucket(Bucket=storage.bucket, **options)
             # Không gắn public policy/ACL. Bucket mới mặc định private.
+            if settings.local_storage_cors_enabled:
+                storage._client.put_bucket_cors(
+                    Bucket=storage.bucket,
+                    CORSConfiguration={
+                        "CORSRules": [
+                            {
+                                "AllowedOrigins": settings.cors_origin_list,
+                                "AllowedMethods": ["GET", "HEAD"],
+                                "AllowedHeaders": ["*"],
+                                "ExposeHeaders": ["ETag"],
+                                "MaxAgeSeconds": 300,
+                            }
+                        ]
+                    },
+                )
             return
         except Exception:
             if attempt == 29:

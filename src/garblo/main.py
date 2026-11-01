@@ -1,12 +1,14 @@
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from garblo.api.routes import router
 from garblo.config import get_settings
+from garblo.local_runtime import check_runtime
 from garblo.recommendations.conversation_routes import router as conversation_router
 from garblo.recommendations.routes import router as recommendation_router
 
@@ -24,6 +26,20 @@ app.include_router(recommendation_router, prefix=settings.api_v1_prefix)
 app.include_router(conversation_router, prefix=settings.api_v1_prefix)
 
 
+@app.exception_handler(RequestValidationError)
+async def validation_error(_request: Request, exc: RequestValidationError) -> JSONResponse:
+    # Không phản chiếu input/context: có thể chứa mật khẩu, token hoặc ảnh.
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": [
+                {key: error[key] for key in ("type", "loc", "msg") if key in error}
+                for error in exc.errors()
+            ]
+        },
+    )
+
+
 @app.get("/health", tags=["system"])
 def health() -> dict[str, object]:
     return {
@@ -31,7 +47,21 @@ def health() -> dict[str, object]:
         "environment": settings.app_env,
         "ai_configured": settings.ai_is_configured,
         "storage_configured": settings.storage_is_configured,
+        "catalogue_configured": {
+            "openai": settings.analysis_is_configured("openai"),
+            "fpt": settings.analysis_is_configured("fpt"),
+        },
     }
+
+
+@app.get("/ready", tags=["system"])
+def readiness(settings=Depends(get_settings)) -> JSONResponse:
+    checks = check_runtime(settings)
+    ready = all(checks.values())
+    return JSONResponse(
+        status_code=200 if ready else 503,
+        content={"status": "ready" if ready else "not_ready", "checks": checks},
+    )
 
 
 @app.get("/mock", include_in_schema=False)

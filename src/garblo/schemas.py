@@ -18,6 +18,13 @@ class RegisterRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=120)
     password: str = Field(min_length=12, max_length=128)
 
+    @field_validator("password")
+    @classmethod
+    def bcrypt_byte_limit(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 72:
+            raise ValueError("Mật khẩu không được vượt quá 72 byte UTF-8")
+        return value
+
 
 class LoginRequest(BaseModel):
     email: EmailStr
@@ -66,6 +73,12 @@ class AssetResponse(APIModel):
 class AssetDownloadResponse(BaseModel):
     url: str
     expires_in_seconds: int
+
+
+class UploadOperationResponse(APIModel):
+    request_key: str
+    status: Literal["pending", "completed", "failed"]
+    asset_id: str | None
 
 
 class GarmentPatch(BaseModel):

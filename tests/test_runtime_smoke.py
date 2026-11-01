@@ -20,6 +20,7 @@ def test_api_worker_runtime_upload_private_download_and_missing_config(image_byt
         health = client.get("/health")
         assert health.status_code == 200
         assert health.json()["ai_configured"] is False
+        assert health.json()["catalogue_configured"] == {"openai": False, "fpt": False}
         assert client.get("/mock").status_code == 404
         email = "runtime-" + uuid.uuid4().hex + "@example.com"
         password = "test-password-not-for-deployment"

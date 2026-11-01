@@ -1,0 +1,14 @@
+# Chỉ dùng cùng compose.local.yml và project garblo-local-wsl-test.
+services:
+  postgres:
+    ports: ['127.0.0.1:25440:5432']
+  api:
+    environment:
+      OPENAI_API_KEY: ''
+      FPT_VLM_API_KEY: ''
+      AZURE_OPENAI_API_KEY: ''
+  worker:
+    environment:
+      OPENAI_API_KEY: ''
+      FPT_VLM_API_KEY: ''
+      AZURE_OPENAI_API_KEY: ''

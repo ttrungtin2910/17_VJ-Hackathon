@@ -1,4 +1,5 @@
 import os
+import time
 import uuid
 
 import httpx
@@ -29,6 +30,20 @@ def test_private_storage_bytes_and_signed_download(settings, image_bytes):
         response = httpx.get(storage.presign_get(key))
         assert response.status_code == 200
         assert response.content == image_bytes
+        origin = "http://localhost:5183"
+        storage._client.put_bucket_cors(
+            Bucket=storage.bucket,
+            CORSConfiguration={
+                "CORSRules": [{"AllowedOrigins": [origin], "AllowedMethods": ["GET", "HEAD"]}]
+            },
+        )
+        cors = httpx.get(storage.presign_get(key), headers={"Origin": origin})
+        assert cors.headers.get("access-control-allow-origin") == origin
+        signed_short = storage._presign_client.generate_presigned_url(
+            "get_object", Params={"Bucket": storage.bucket, "Key": key}, ExpiresIn=1
+        )
+        time.sleep(2)  # Cố ý chờ TTL trên storage thật, không phải retry polling.
+        assert httpx.get(signed_short).status_code == 403
     finally:
         storage.delete(key)
         storage._client.delete_bucket(Bucket=settings.s3_bucket)

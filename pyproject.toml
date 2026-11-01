@@ -43,6 +43,8 @@ packages = ["src/garblo"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Giảm nguy cơ traceback dài in repr fixture/header đăng nhập; vẫn cần redaction log.
+addopts = "--tb=short"
 markers = [
   "integration: yêu cầu PostgreSQL/storage riêng cho kiểm thử",
 ]

@@ -84,6 +84,24 @@ class MediaAsset(Timestamped, Base):
     )
 
 
+class UploadOperation(Timestamped, Base):
+    """Giữ định danh upload qua mất response; không lưu bytes ảnh hay key provider."""
+
+    __tablename__ = "upload_operations"
+    __table_args__ = (UniqueConstraint("user_id", "request_key", name="uq_upload_user_key"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    request_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
+    reserved_asset_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False)
+    object_key: Mapped[str] = mapped_column(String(512), unique=True, nullable=False)
+    asset_id: Mapped[str | None] = mapped_column(ForeignKey("media_assets.id", ondelete="RESTRICT"))
+    lease_token: Mapped[str | None] = mapped_column(String(36))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class Garment(Timestamped, Base):
     __tablename__ = "garments"
 

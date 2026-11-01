@@ -9,12 +9,13 @@ Các đường dẫn và lệnh bên dưới tính từ `garblo-backend/`; chạ
 - Đổi env Compose: `docker compose up -d --no-build --force-recreate api worker`, không chỉ `restart`. `S3_PUBLIC_ENDPOINT_URL` phải truy cập được từ browser, không dùng hostname nội bộ `rustfs`; không thêm `-v` khi dừng nếu cần giữ dữ liệu.
 - `.env` được đọc theo thư mục chạy lệnh; settings có cache, app/DB engine khởi tạo lúc import. Đổi env phải khởi động lại cả API và worker. Alembic lấy URL từ settings, ghi đè cấu hình trong `alembic.ini`; đổi kết nối qua `DATABASE_URL`.
 - `/mock` phục vụ `src/garblo/static/mock.html`; mặc định bật, `APP_ENV=production` không tự tắt. Compose đặt `ENABLE_API_MOCK_UI=false` rõ ràng.
+- Bộ điều phối FE–BE WSL riêng ở `local-wsl/`: sample/key/start, project `garblo-local-wsl`, không thay `compose.yaml`/env hiện hữu. Runbook `docs/HUONG_DAN_CHAY_LOCAL_WSL.md`; `/ready` kiểm DB/schema/storage, worker health có heartbeat, không gọi provider. Profile test dùng env/override/project/volume riêng, không `down -v`.
 
 ## API và xử lý AI
 
 - `src/garblo/main.py` gắn `src/garblo/api/routes.py` dưới `/v1` mặc định. Luồng catalogue: upload → job → `candidate_ids` → sửa draft → commit → garment; phân tích không tự thêm món vào tủ. Contract/curl: `docs/api-rebuild.md`, đối chiếu với routes và `src/garblo/schemas.py` khi tích hợp.
 - Hàng đợi là bảng PostgreSQL `ai_jobs` (`FOR UPDATE SKIP LOCKED`), không có Redis/Celery. Giữ lease/lock token khi sửa worker để chặn kết quả từ worker cũ. Lookbook tạo look `preview` và approval `pending`; approval khác với feedback like/dislike.
-- OpenAI direct mặc định: catalogue cần `OPENAI_API_KEY` + `OPENAI_VLM_MODEL`; lookbook cần thêm `OPENAI_IMAGE_MODEL`. FPT chỉ phân tích khi request catalogue chọn `vlm_provider=fpt`, cần `FPT_VLM_API_KEY`. Azure chỉ dành cho job legacy; không fallback chéo provider hoặc tạo kết quả giả. Thiếu config trả `503`/`provider_not_configured`, không enqueue.
+- OpenAI direct mặc định: catalogue cần `OPENAI_API_KEY` + `OPENAI_VLM_MODEL`; lookbook cần thêm `OPENAI_IMAGE_MODEL`. FPT explicit dùng `vlm_provider=fpt` + `FPT_VLM_API_KEY`. Chỉ catalogue OpenAI mới khi `CATALOGUE_FPT_FALLBACK_ENABLED=true` và có FPT key được snapshot policy tối đa hai attempts OpenAI rồi attempt ba FPT sau hai lỗi vision transient có audit; không tăng cap <3. Không fallback auth/billing/safety/consent/invalid output/lease/budget; không áp dụng render/intent hoặc job legacy. Azure chỉ dành cho legacy; không tạo kết quả giả. Thiếu config trả `503`/`provider_not_configured`, không enqueue.
 - Tạo/retry job cần consent `ai_processing`. Retry giữ provider/model snapshot và tổng attempt budget (`WORKER_MAX_ATTEMPTS`, mặc định 3); không reset attempts hoặc tự thay model cho job legacy thiếu snapshot.
 - Lookbook dùng preset allowlist (`everyday`, `office`, `weekend`, `evening`), không nhận prompt tự do; route variation được giữ nhưng hiện trả `422` sau các kiểm tra quyền/consent/config.
 

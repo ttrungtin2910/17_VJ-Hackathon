@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     s3_bucket: str = "garblo-assets"
     s3_region: str = "us-east-1"
     s3_presign_seconds: int = 900
+    local_storage_cors_enabled: bool = False
     max_upload_bytes: int = 10 * 1024 * 1024
     max_image_pixels: int = 25_000_000
 
@@ -50,6 +51,7 @@ class Settings(BaseSettings):
     catalogue_native_structured_output: bool = False
     catalogue_supports_temperature: bool = True
     catalogue_deduplicate_uploads: bool = False
+    catalogue_fpt_fallback_enabled: bool = False
     catalogue_screening_model: str | None = None
     catalogue_escalation_model: str | None = None
     fpt_screening_model: str | None = None
@@ -60,6 +62,12 @@ class Settings(BaseSettings):
     stylist_intent_model: str | None = None
     stylist_intent_max_calls: int = Field(default=3, ge=1, le=6)
     stylist_intent_native_structured_output: bool = False
+
+    @field_validator("catalogue_schema_version", mode="before")
+    @classmethod
+    def parse_catalogue_schema_version(cls, value):
+        # Environment/dotenv cung cấp chuỗi; Literal số không tự chuyển kiểu.
+        return int(value) if isinstance(value, str) and value in {"1", "2"} else value
 
     @field_validator("catalogue_segmentation_url")
     @classmethod
