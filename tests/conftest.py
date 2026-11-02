@@ -94,6 +94,9 @@ class MemoryStorage:
         self.downloads.append(key)
         return "https://private-storage.invalid/signed-test-image"
 
+    def delete(self, key):
+        self.objects.pop(key, None)
+
 
 @pytest.fixture()
 def storage(monkeypatch):
@@ -155,6 +158,7 @@ def providers(image_bytes):
             return Analysis(AnalysisResult.model_validate({"items": state.items}))
 
         def render_look(self, *, before_call, **kwargs):
+            state.render_images = kwargs.get("images")
             before_call()
             calls.append(("render", self.provider, self.model, self.image_model))
             if state.error:

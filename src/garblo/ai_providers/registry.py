@@ -38,7 +38,7 @@ class ProviderRegistry:
             raise AIProviderError("Nhà cung cấp chưa được cấu hình", "provider_not_configured")
         if provider == "openai":
             return OpenAIDirectProvider(self.settings, model, image_model)
-        if provider == "fpt" and image_model is None:
+        if provider == "fpt":
             return FPTQwenAnalyzer(self.settings, model)
         if provider == "azure_openai":
             return LegacyAzureProvider(self.settings, model, image_model)

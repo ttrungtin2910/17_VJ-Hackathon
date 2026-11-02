@@ -44,6 +44,9 @@ def test_private_storage_bytes_and_signed_download(settings, image_bytes):
         )
         time.sleep(2)  # Cố ý chờ TTL trên storage thật, không phải retry polling.
         assert httpx.get(signed_short).status_code == 403
+        # Retry xóa món phải thành công kể cả khi object đã mất từ lần trước.
+        storage.delete(key)
+        storage.delete(key)
     finally:
         storage.delete(key)
         storage._client.delete_bucket(Bucket=settings.s3_bucket)

@@ -1,9 +1,11 @@
 import base64
+import io
 import json
 
 import httpx
 import pytest
 from openai import OpenAI
+from PIL import Image
 
 from garblo.ai import AIProviderError
 from garblo.ai_providers.openai_direct import OpenAIDirectProvider
@@ -124,3 +126,69 @@ def test_consent_rechecked_between_planning_and_images(settings):
             )
     assert error.value.code == "consent_revoked"
     assert calls == ["/v1/chat/completions"]
+
+
+def test_render_uses_multipart_images_edit(settings, image_bytes):
+    paths = []
+
+    def handler(request):
+        paths.append(request.url.path)
+        if request.url.path.endswith("/chat/completions"):
+            return httpx.Response(200, json=completion('{"image_prompt":"An outfit"}'))
+        assert request.url.path == "/v1/images/edits"
+        assert "multipart/form-data" in request.headers["content-type"]
+        assert image_bytes in request.content
+        assert b"adult synthetic model" in request.content
+        return httpx.Response(
+            200, json={"created": 1, "data": [{"b64_json": base64.b64encode(image_bytes).decode()}]}
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        provider = OpenAIDirectProvider(
+            settings, "test-vision", "gpt-image-test", OpenAI(api_key="test", http_client=http)
+        )
+        result = provider.render_look(
+            garments=[ATTRIBUTES],
+            images=[("item.png", image_bytes, "image/png")],
+            theme="office",
+            occasion=None,
+            instruction=None,
+            before_call=lambda: None,
+        )
+    assert result.image_bytes == image_bytes
+    assert paths == ["/v1/chat/completions", "/v1/images/edits"]
+
+
+def test_component_image_requests_transparent_png(settings, image_bytes):
+    output = io.BytesIO()
+    Image.new("RGBA", (8, 8), (10, 20, 30, 128)).save(output, format="PNG")
+    component_png = output.getvalue()
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        assert request.url.path == "/v1/images/edits"
+        assert "multipart/form-data" in request.headers["content-type"]
+        assert b'"background"' in request.content and b"transparent" in request.content
+        assert b'"output_format"' in request.content and b"png" in request.content
+        assert image_bytes in request.content
+        return httpx.Response(
+            200,
+            json={
+                "created": 1,
+                "data": [{"b64_json": base64.b64encode(component_png).decode()}],
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        provider = OpenAIDirectProvider(
+            settings, "test-vision", "gpt-image-test", OpenAI(api_key="test", http_client=http)
+        )
+        result = provider.generate_component_image(
+            image=image_bytes,
+            mime_type="image/png",
+            description=ATTRIBUTES,
+            before_call=lambda: None,
+        )
+    assert result == component_png
+    assert len(requests) == 1

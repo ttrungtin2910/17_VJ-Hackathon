@@ -32,19 +32,20 @@ phải khởi động lại **cả hai process**. `/mock` chỉ bật khi `ENABL
 
 | Tác vụ | Cấu hình bắt buộc |
 |---|---|
-| Catalogue OpenAI mặc định | `OPENAI_API_KEY`, `OPENAI_VLM_MODEL` |
-| Catalogue FPT explicit | Chỉ `FPT_VLM_API_KEY` |
+| Catalogue OpenAI mặc định | `OPENAI_API_KEY`, `OPENAI_VLM_MODEL`, `OPENAI_IMAGE_MODEL` |
+| Catalogue FPT explicit | `FPT_VLM_API_KEY` và OpenAI key/image model để tạo ảnh từng món |
 | Lookbook planning + image | Ba biến `OPENAI_API_KEY`, `OPENAI_VLM_MODEL`, `OPENAI_IMAGE_MODEL` |
 
 FPT mặc định dùng `https://mkp-api.fptcloud.com/v1`, model
 `Qwen2.5-VL-7B-Instruct`, timeout 60 giây. Overrides là optional như `.env.example`.
 Có FPT key **không đổi default OpenAI**. API thiếu config trả `503` với
-`detail.code=provider_not_configured`, không enqueue. Catalogue không cần image model.
+`detail.code=provider_not_configured`, không enqueue. Catalogue v2 cần image model để tạo ảnh riêng;
+catalogue v1 legacy không cần.
 
 OpenAI model ID phải được operator xác minh trong organization/project có credit:
 
 1. Chọn chat model hỗ trợ **ảnh đầu vào và Chat Completions**, cấu hình `OPENAI_VLM_MODEL`.
-2. Chọn model hỗ trợ **Images generations**, cấu hình `OPENAI_IMAGE_MODEL`.
+2. Chọn model hỗ trợ **Images edits**, ảnh tham chiếu và nền trong suốt PNG, cấu hình `OPENAI_IMAGE_MODEL`.
 3. Adapter dùng `size=1024x1024`; model `dall-e*` yêu cầu `response_format=b64_json`,
    các model khác phải trả `b64_json` mặc định. Không dùng URL tùy ý từ provider.
 4. Model xuất hiện trong danh sách account chưa chứng minh quyền generate image;
@@ -134,12 +135,14 @@ production. Migration đầu đã phát hành được giữ nguyên cả nội 
 
 ## Catalogue v2 — Chặng A
 
-Job mới mặc định snapshot `catalogue-v2`: tối đa 20 component **ở mức metadata**,
+Job mới mặc định snapshot `catalogue-v2`: tối đa 20 component được nhận diện,
 thuộc tính chưa biết dùng null, không có confidence giả. Job v1/legacy giữ schema/prompt
 tương ứng; đặt `CATALOGUE_SCHEMA_VERSION=1` để ngừng enqueue v2 khi rollback, không sửa
 snapshot job đang chạy. Cần restart cả API/worker sau đổi env.
 
-- Review có `details`, `review`, `schema_version`, `component_asset_id`; attributes cũ vẫn giữ.
+- Mỗi component cần một lượt OpenAI Images riêng; Review có `details`, `review`,
+  `schema_version`, `component_asset_id`; attributes cũ vẫn giữ. Ảnh được tái tạo gần giống,
+  không bảo đảm giữ nguyên pixel/chi tiết món gốc.
 - PATCH candidate `status=draft|rejected`; committed không sửa qua draft.
 - Commit bắt buộc category đã xác nhận, validate cả batch và giữ ID khi retry.
 - Asset có thể `partially_catalogued`; chỉ `catalogued` khi không còn draft chưa xử lý.
@@ -148,8 +151,8 @@ snapshot job đang chạy. Cần restart cả API/worker sau đổi env.
   không coi là miễn phí. Deadline bắt đầu từ request đầu, không reset khi retry/reclaim.
 - Token reservation do operator cấu hình, không phải hard cap chi phí USD upstream;
   usage có thể vượt estimate. Khi vượt budget không gửi request tiếp theo.
-- P1 opt-in: checksum dedup cùng user, screening relevance bằng model riêng, escalation tối đa
-  một lần/attempt và HTTP segmentation service có mask. Không fallback provider.
+- P1 opt-in: checksum dedup cùng user, screening relevance bằng model riêng và escalation tối đa
+  một lần/attempt. Segmentation service có mask dành cho snapshot cấu hình cũ. Không fallback provider.
 - Screening dùng cùng typed analysis contract, **không phải safety moderation**.
   `CATALOGUE_NATIVE_STRUCTURED_OUTPUT` chỉ bật sau xác minh capability thật.
 
@@ -185,9 +188,9 @@ trước khi dùng worker không hỗ trợ v2. Không sửa snapshot job đang 
 
 ## Giới hạn hiện tại
 
-- V2 nhận nhiều metadata component; không tự giả lập ảnh tách. Segmentation chỉ hoạt động khi
-  operator cấu hình service/model thật, trả crop/mask theo contract; chưa kiểm chứng chất lượng
-  segmentation live. Không VTON/garment reference fidelity. Lookbook cũ dựng từ metadata.
+- Ảnh component do OpenAI tái tạo có thể thay đổi chi tiết, màu hoặc hình dáng so với ảnh gốc;
+  candidate vẫn cần người dùng review. Budget/deadline giới hạn tổng lượt; thiếu ảnh khi hết budget
+  làm job thất bại. Không VTON/garment reference fidelity. Lookbook cũ dựng từ metadata.
 - FPT hỗ trợ JSON envelope/root và parse SSE nếu response thực sự là SSE; runtime key
   của đội vẫn cần xác minh `stream:false`. Không suy đoán wire behavior từ mock.
 - Ảnh được decode, giới hạn pixel, bỏ metadata/EXIF, áp dụng orientation; JPEG chuyển PNG
@@ -201,3 +204,7 @@ trước khi dùng worker không hỗ trợ v2. Không sửa snapshot job đang 
 # Bổ sung local WSL — policy catalogue
 
 `CATALOGUE_FPT_FALLBACK_ENABLED` mặc định `false`. Bật cùng FPT key chỉ ảnh hưởng job catalogue OpenAI **mới**: snapshot provider/model fallback (không key), tối đa hai worker attempts OpenAI, attempt thứ ba FPT sau hai lỗi vision transient có audit. Cap gốc <3 không tăng; có policy thì cap tối đa 3, đồng thời vẫn chịu call/token/deadline/consent/lease. Không fallback vì auth/billing/safety/schema/input/consent; không fallback render/intent/legacy/explicit FPT. Thiếu FPT key giữ OpenAI-only và cảnh báo một lần mỗi process. Native structured output của FPT luôn tắt; Pydantic validate cùng schema. `job.model_provider`/snapshot vẫn là provider yêu cầu; output có `effective_provider/effective_model`, physical-call ledger ghi provider/model thực. Unit/provider giả không chứng minh wire-live.
+
+## Render từ ảnh garment
+
+Frontend real có thể tạo và duyệt ảnh từ từng bộ phối. Job mới dùng ảnh component/ảnh nguồn qua OpenAI image edit; job legacy giữ snapshot cũ. Xem [contract, cấu hình và kiểm thử](docs/RENDER_TU_ANH_GARMENT.md).

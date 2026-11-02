@@ -32,6 +32,9 @@ def ensure_job_configuration(settings: Settings, provider: str, ref: dict, kind:
         configured = False
     if kind in {"lookbook", "variation"} and not ref.get("image_model"):
         configured = False
+    if kind == "catalogue" and ref.get("schema_version", 1) == 2:
+        configured = configured and bool(settings.openai_api_key and ref.get("image_model"))
+        configured = configured and not str(ref.get("image_model", "")).startswith("dall-e")
     if not configured:
         raise AIProviderError(
             "Nhà cung cấp chưa được cấu hình cho tác vụ", "provider_not_configured"
@@ -46,6 +49,12 @@ def new_snapshot(settings: Settings, provider: str, kind: str) -> dict:
     }
     if kind in {"lookbook", "variation"}:
         ref["image_model"] = settings.openai_image_model
+        if provider == "openai":
+            if (settings.openai_image_model or "").startswith("dall-e"):
+                raise AIProviderError(
+                    "Cần image model hỗ trợ ảnh tham chiếu", "provider_not_configured"
+                )
+            ref["render_mode"] = "garment_images"
     if kind == "catalogue":
         version = settings.catalogue_schema_version
         screening_model = (
@@ -92,6 +101,8 @@ def new_snapshot(settings: Settings, provider: str, kind: str) -> dict:
             segmentation_model=settings.catalogue_segmentation_model,
             segmentation_timeout_seconds=settings.catalogue_segmentation_timeout_seconds,
         )
+        if version == 2:
+            ref["image_model"] = settings.openai_image_model
         if provider == "openai" and settings.catalogue_fpt_fallback_enabled:
             if settings.fpt_vlm_api_key:
                 # Chính sách local tối đa 2 attempts primary + attempt 3 fallback;

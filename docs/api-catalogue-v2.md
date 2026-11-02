@@ -27,7 +27,7 @@ Các field cũ được giữ. Field additive:
     "styles":[],"seasons":[],"uncertain_fields":["material","fit"]
   },
   "review": {"needs_review":true,"reason_codes":[],"edited_by_user":false},
-  "component_asset_id": null
+  "component_asset_id": "<component-asset-id>"
 }
 ```
 
@@ -36,6 +36,8 @@ Các field cũ được giữ. Field additive:
 - `needs_review` không phải confidence. Tất cả component luôn cần người dùng commit.
 - UUID candidate/garment do backend sinh; VLM không sinh persistent IDs.
 - `original_attributes`/`review.original_details` phục vụ audit trước chỉnh sửa.
+- Catalogue v2 tạo một PNG nền trong suốt bằng OpenAI Images cho mỗi component; ảnh có thể
+  khác chi tiết so với món gốc và luôn cần người dùng review. V1/legacy không có ảnh component này.
 
 Ví dụ PATCH:
 
@@ -63,13 +65,26 @@ version, reservation, usage, latency, error và validation outcome; không raw r
 - Reservation serialize bằng khóa job; tổng call và token budgets không reset qua HTTP retry.
 - `execution_deadline_at` bền từ request đầu tiên, kể cả retry/reclaim/timezone khác UTC.
 - Lỗi bổ sung: `model_call_budget_exceeded`, `token_budget_exceeded`, `job_deadline_exceeded`,
-  `provider_refused`, `invalid_segmentation_output`. Refusal không repair để vượt từ chối.
+  `provider_refused`, `invalid_model_output`, `invalid_segmentation_output`. Khi ảnh component không
+  hợp lệ, worker yêu cầu tạo lại; nếu hết budget thì job thất bại trước khi lưu candidates.
+  Refusal không repair để vượt từ chối.
+
+## Ảnh component bằng OpenAI
+
+Job v2 snapshot `OPENAI_IMAGE_MODEL`; mỗi món được gửi lần lượt tới Images Edits với ảnh nguồn,
+`background=transparent` và `output_format=png`. Worker chỉ nhận PNG có kênh alpha, kiểm tra lại
+định dạng/giới hạn ảnh, rồi đối chiếu đủ ảnh theo candidate index. Mọi request dùng chung consent,
+lease, call/token budget và deadline của job. Candidate chỉ được lưu sau khi đủ ảnh hợp lệ.
+
+Review API trả `component_asset_id`; frontend real dùng asset này làm ảnh draft cho candidate.
+Asset có `parent_asset_id` trỏ ảnh upload. Ảnh do model tái tạo có thể đổi màu, form hoặc chi tiết;
+đây không phải segmentation giữ nguyên pixel hay bảo đảm fidelity.
 
 `GET /me/ai-metrics` tổng hợp tối đa 1000 catalogue jobs gần nhất của user. Có physical-call
 p50/p95, token counters, JSON validity, correction/escalation/retry rates. Chi phí USD và
 accuracy chưa có dữ liệu đo trả null; latency không bao gồm queue wait.
 
-## Optional stages và segmentation service
+## Optional stages và snapshot segmentation cũ
 
 Các env optional xem `.env.example`; mặc định tắt. Screening/escalation dùng model đã xác
 minh trên **cùng provider request đã chọn**. Snapshot pin các model/limits, không fallback.
@@ -108,5 +123,5 @@ có thể tạo orphan. Đối soát DB references trước dọn storage, khôn
 ## Release gate
 
 Backend/infrastructure gate xem `architecture/07-acceptance-stage-a.md`. Chưa có live VLM
-hoặc segmentation accuracy gate, chưa tích hợp frontend. Production retention/deletion và
+hoặc ảnh component accuracy gate. Production retention/deletion và
 quyền xử lý dữ liệu provider cần được xác minh riêng; không hứa thu hồi request đã gửi.

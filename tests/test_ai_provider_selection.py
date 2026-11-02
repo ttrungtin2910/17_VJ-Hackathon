@@ -3,7 +3,7 @@ from pydantic import SecretStr
 from sqlalchemy import func, select
 
 from garblo.config import Settings
-from garblo.models import AiJob
+from garblo.models import AiJob, MediaAsset
 from tests.helpers import catalogue, upload
 
 
@@ -44,9 +44,26 @@ def test_invalid_or_missing_config_never_enqueues(client, headers, asset_id, db,
     assert db.scalar(select(func.count()).select_from(AiJob)) == 0
 
 
-def test_catalogue_does_not_require_image_model(client, headers, asset_id, settings):
+def test_legacy_catalogue_does_not_require_image_model(client, headers, asset_id, settings):
+    settings.catalogue_schema_version = 1
     settings.openai_image_model = None
     catalogue(client, headers, asset_id)
+
+
+def test_catalogue_v2_missing_image_model_can_resume_same_asset(
+    client, headers, asset_id, settings, db
+):
+    settings.openai_image_model = None
+    response = client.post(f"/v1/assets/{asset_id}/catalogize", headers=headers, json={})
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "provider_not_configured"
+    assert db.scalar(select(func.count()).select_from(AiJob)) == 0
+    assert db.get(MediaAsset, asset_id).status == "uploaded"
+
+    settings.openai_image_model = "test-image"
+    job_id = catalogue(client, headers, asset_id, {})
+    assert db.get(AiJob, job_id).input_ref["image_model"] == "test-image"
+    assert db.scalar(select(func.count()).select_from(AiJob)) == 1
 
 
 def test_both_providers_do_not_share_selector(

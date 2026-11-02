@@ -334,9 +334,11 @@ class JobWorker:
             mask_asset_id = None
             if index in segments:
                 part = segments[index]
-                mask = self._save_component_asset(
-                    claim, asset.id, index, "mask", part["mask_bytes"], "image/png"
-                )
+                mask = None
+                if part.get("mask_bytes"):
+                    mask = self._save_component_asset(
+                        claim, asset.id, index, "mask", part["mask_bytes"], "image/png"
+                    )
                 component = self._save_component_asset(
                     claim,
                     asset.id,
@@ -344,9 +346,10 @@ class JobWorker:
                     "component",
                     part["image_bytes"],
                     part["mime_type"],
-                    mask.id,
+                    mask.id if mask else None,
                 )
-                component_asset_id, mask_asset_id = component.id, mask.id
+                component_asset_id = component.id
+                mask_asset_id = mask.id if mask else None
             candidate = GarmentCandidate(
                 user_id=claim.user_id,
                 asset_id=asset.id,
@@ -403,7 +406,7 @@ class JobWorker:
                 "job_id": claim.id,
                 "candidate_index": index,
                 "mask_asset_id": mask_id,
-                "model": claim.ref.get("segmentation_model"),
+                "model": claim.ref.get("image_model") or claim.ref.get("segmentation_model"),
             },
         )
         self.storage.put_bytes(key, body, mime)
@@ -454,11 +457,37 @@ class JobWorker:
             }
             for garment in garments
         ]
+        image_options = {}
+        if claim.ref.get("render_mode") == "garment_images":
+            if any(garment.catalog_status != "active" for garment in garments):
+                raise AIProviderError("Món đồ không còn hoạt động", "wardrobe_changed")
+            images = []
+            for garment in garments:
+                self._before_call(claim)
+                asset = self.db.scalar(
+                    select(MediaAsset).where(
+                        MediaAsset.id == (garment.component_asset_id or garment.source_asset_id),
+                        MediaAsset.user_id == claim.user_id,
+                    )
+                )
+                if not asset:
+                    raise AIProviderError("Ảnh món đồ không còn tồn tại", "source_not_found")
+                try:
+                    body, mime = sanitize_image(
+                        self.storage.get_bytes(asset.object_key),
+                        self.settings.max_upload_bytes,
+                        self.settings.max_image_pixels,
+                    )
+                except (ValueError, KeyError) as exc:
+                    raise AIProviderError("Ảnh món đồ không hợp lệ", "source_not_found") from exc
+                images.append((f"{garment.id}.png", body, mime))
+            image_options["images"] = images
         theme, occasion = book.theme, book.occasion
         instruction = PRESETS.get(claim.ref.get("preset_id"), claim.ref.get("instruction"))
         self.db.rollback()
         return provider.render_look(
             garments=data,
+            **image_options,
             theme=theme,
             occasion=occasion,
             instruction=instruction,

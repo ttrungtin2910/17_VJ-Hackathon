@@ -1,3 +1,5 @@
+import base64
+import io
 from types import SimpleNamespace
 
 import pytest
@@ -6,12 +8,18 @@ from sqlalchemy import func, select
 from garblo.ai import AIProviderError
 from garblo.ai_providers.contracts import Analysis
 from garblo.catalogue.contracts import AnalysisResultV2
-from garblo.models import AiCallAttempt, AiJob, Garment, MediaAsset
+from garblo.models import AiCallAttempt, AiJob, Garment, GarmentCandidate, MediaAsset
 from tests.conftest import ATTRIBUTES
 from tests.helpers import auth_headers, catalogue, upload
 
 
 def v2_provider(worker, items, callback=None):
+    from PIL import Image
+
+    output = io.BytesIO()
+    Image.new("RGBA", (8, 8), (20, 40, 60, 128)).save(output, format="PNG")
+    component_png = output.getvalue()
+
     class Provider:
         def configure_catalogue(self, snapshot):
             self.snapshot = snapshot
@@ -33,7 +41,14 @@ def v2_provider(worker, items, callback=None):
                 )
             )
 
-    worker.providers = SimpleNamespace(resolve=lambda *args: Provider())
+        def generate_component_image(self, *, before_call, **kwargs):
+            before_call()
+            self.on_result({"total_tokens": 10}, 3, None)
+            return component_png
+
+    provider = Provider()
+    worker.providers = SimpleNamespace(resolve=lambda *args: provider)
+    return provider
 
 
 def test_multi_review_partial_commit_reject_restore_and_durable_ids(
@@ -90,7 +105,12 @@ def test_multi_review_partial_commit_reject_restore_and_durable_ids(
     assert pants["details"]["display_name"] == "Quần đi làm"
     assert pants["details"]["pattern"] == "solid"
     calls = client.get(f"/v1/jobs/{job_id}/calls", headers=headers).json()
-    assert len(calls) == 1 and calls[0]["usage"]["total_tokens"] == 30
+    assert [call["stage"] for call in calls] == [
+        "analysis",
+        "component_image",
+        "component_image",
+    ]
+    assert calls[0]["usage"]["total_tokens"] == 30
     assert calls[0]["prompt_version"] == "catalogue-v2"
     other = auth_headers(client, "ledger-other@example.com")
     assert client.get(f"/v1/jobs/{job_id}/calls", headers=other).status_code == 404
@@ -110,6 +130,85 @@ def test_unknown_category_blocks_entire_selection_before_write(
         == 422
     )
     assert db.scalar(select(func.count()).select_from(Garment)) == 0
+
+
+def test_component_image_invalid_output_is_retried_and_mapped_to_candidate(
+    client, headers, asset_id, worker, db
+):
+    items = [dict(ATTRIBUTES), {**ATTRIBUTES, "category": "pants"}]
+    provider = v2_provider(worker, items)
+    generate = provider.generate_component_image
+    calls = 0
+
+    def generate_with_one_invalid(*, before_call, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            before_call()
+            provider.on_result({}, 1, "invalid_model_output")
+            raise AIProviderError("PNG không hợp lệ", "invalid_model_output")
+        return generate(before_call=before_call, **kwargs)
+
+    provider.generate_component_image = generate_with_one_invalid
+    job_id = catalogue(client, headers, asset_id)
+    worker.process_next()
+    job = client.get(f"/v1/jobs/{job_id}", headers=headers).json()
+    assert job["status"] == "succeeded", job
+    candidates = list(
+        db.scalars(select(GarmentCandidate).order_by(GarmentCandidate.candidate_index))
+    )
+    assert len(candidates) == 2 and all(item.component_asset_id for item in candidates)
+    assert len({item.component_asset_id for item in candidates}) == 2
+    calls_audit = client.get(f"/v1/jobs/{job_id}/calls", headers=headers).json()
+    assert [call["stage"] for call in calls_audit] == [
+        "analysis",
+        "component_image",
+        "component_image_repair",
+        "component_image",
+    ]
+
+
+def test_missing_component_image_at_call_budget_fails_without_candidates(
+    client, headers, asset_id, worker, db, settings
+):
+    settings.catalogue_max_calls = 2
+    v2_provider(worker, [dict(ATTRIBUTES), {**ATTRIBUTES, "category": "pants"}])
+    job_id = catalogue(client, headers, asset_id)
+    worker.process_next()
+    job = db.get(AiJob, job_id)
+    assert job.status == "failed" and job.error_code == "model_call_budget_exceeded"
+    assert db.scalar(select(func.count()).select_from(GarmentCandidate)) == 0
+    assert (
+        db.scalar(
+            select(func.count()).select_from(MediaAsset).where(MediaAsset.asset_type == "component")
+        )
+        == 0
+    )
+
+
+def test_invalid_component_images_exhaust_budget_without_candidates(
+    client, headers, asset_id, worker, db, settings
+):
+    settings.catalogue_max_calls = 2
+    provider = v2_provider(worker, [dict(ATTRIBUTES)])
+
+    def always_invalid(*, before_call, **kwargs):
+        before_call()
+        provider.on_result({}, 1, "invalid_model_output")
+        raise AIProviderError("PNG không hợp lệ", "invalid_model_output")
+
+    provider.generate_component_image = always_invalid
+    job_id = catalogue(client, headers, asset_id)
+    worker.process_next()
+    job = db.get(AiJob, job_id)
+    assert job.status == "failed" and job.error_code == "model_call_budget_exceeded"
+    assert db.scalar(select(func.count()).select_from(GarmentCandidate)) == 0
+    assert (
+        db.scalar(
+            select(func.count()).select_from(MediaAsset).where(MediaAsset.asset_type == "component")
+        )
+        == 0
+    )
 
 
 def test_ledger_budget_survives_manual_retry(client, headers, asset_id, worker, db, settings):
@@ -201,10 +300,12 @@ def test_deadline_persists_across_retry(client, headers, asset_id, worker, provi
 def test_repair_audit_records_usage_validation_and_stage(
     client, headers, asset_id, worker, settings
 ):
+    import io
     import json
 
     import httpx
     from openai import OpenAI
+    from PIL import Image
 
     from garblo.ai_providers.openai_direct import OpenAIDirectProvider
     from tests.test_openai_direct import completion
@@ -218,14 +319,29 @@ def test_repair_audit_records_usage_validation_and_stage(
         ]
     )
 
+    component = io.BytesIO()
+    Image.new("RGBA", (8, 8), (10, 20, 30, 128)).save(component, format="PNG")
+    component_png = component.getvalue()
+
     def handler(request):
+        if request.url.path == "/v1/images/edits":
+            return httpx.Response(
+                200,
+                json={
+                    "created": 1,
+                    "data": [{"b64_json": base64.b64encode(component_png).decode()}],
+                },
+            )
         result = completion(next(responses))
         result["usage"] = {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
         return httpx.Response(200, json=result)
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as http:
         provider = OpenAIDirectProvider(
-            settings, "test-vision", client=OpenAI(api_key="test", http_client=http, max_retries=0)
+            settings,
+            "test-vision",
+            "test-image",
+            OpenAI(api_key="test", http_client=http, max_retries=0),
         )
         worker.providers = SimpleNamespace(resolve=lambda *args: provider)
         job_id = catalogue(client, headers, asset_id)
@@ -233,9 +349,13 @@ def test_repair_audit_records_usage_validation_and_stage(
     job = client.get(f"/v1/jobs/{job_id}", headers=headers).json()
     assert job["status"] == "succeeded", job
     calls = client.get(f"/v1/jobs/{job_id}/calls", headers=headers).json()
-    assert [call["stage"] for call in calls] == ["analysis", "analysis_repair"]
-    assert [call["validation_status"] for call in calls] == ["invalid", "valid"]
-    assert [call["usage"]["total_tokens"] for call in calls] == [30, 30]
+    assert [call["stage"] for call in calls] == [
+        "analysis",
+        "analysis_repair",
+        "component_image",
+    ]
+    assert [call["validation_status"] for call in calls[:2]] == ["invalid", "valid"]
+    assert [call["usage"]["total_tokens"] for call in calls[:2]] == [30, 30]
 
 
 def test_metrics_are_owner_scoped_and_do_not_invent_cost_or_accuracy(
@@ -249,8 +369,8 @@ def test_metrics_are_owner_scoped_and_do_not_invent_cost_or_accuracy(
     ][0]
     client.patch(f"/v1/candidates/{candidate_id}", headers=headers, json={"color": "red"})
     result = client.get("/v1/me/ai-metrics", headers=headers).json()
-    assert result["window"]["jobs"] == 1 and result["calls"] == 1
-    assert result["tokens"]["total_tokens"] == 30
+    assert result["window"]["jobs"] == 1 and result["calls"] == 2
+    assert result["tokens"]["total_tokens"] == 40
     assert result["human_correction_rate"] == 1
     assert result["cost_usd"] is result["quality_accuracy"] is None
     other = auth_headers(client, "metrics-other@example.com")
@@ -344,10 +464,12 @@ def test_optional_stages_persist_segment_and_mask_lineage(
 def test_truncation_is_audited_as_repair_but_refusal_is_not_retried(
     client, headers, asset_id, worker, settings, provider_name, refused
 ):
+    import io
     import json
 
     import httpx
     from openai import OpenAI
+    from PIL import Image
     from pydantic import SecretStr
 
     from garblo.ai_providers.fpt_qwen import FPTQwenAnalyzer
@@ -356,8 +478,19 @@ def test_truncation_is_audited_as_repair_but_refusal_is_not_retried(
 
     settings.fpt_vlm_api_key = SecretStr("test-fpt-key")
     count = 0
+    component = io.BytesIO()
+    Image.new("RGBA", (8, 8), (10, 20, 30, 128)).save(component, format="PNG")
+    component_png = component.getvalue()
 
     def handler(request):
+        if request.url.path == "/v1/images/edits":
+            return httpx.Response(
+                200,
+                json={
+                    "created": 1,
+                    "data": [{"b64_json": base64.b64encode(component_png).decode()}],
+                },
+            )
         nonlocal count
         count += 1
         response = completion(
@@ -372,16 +505,22 @@ def test_truncation_is_audited_as_repair_but_refusal_is_not_retried(
         return httpx.Response(200, json=response)
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as http:
-        provider = (
-            OpenAIDirectProvider(
-                settings,
-                "test-vision",
-                client=OpenAI(api_key="test", http_client=http, max_retries=0),
-            )
+        openai_provider = OpenAIDirectProvider(
+            settings,
+            "test-vision",
+            "test-image",
+            OpenAI(api_key="test", http_client=http, max_retries=0),
+        )
+        analysis_provider = (
+            openai_provider
             if provider_name == "openai"
             else FPTQwenAnalyzer(settings, settings.fpt_vlm_model, client=http)
         )
-        worker.providers = SimpleNamespace(resolve=lambda *args: provider)
+        worker.providers = SimpleNamespace(
+            resolve=lambda provider, *args: (
+                analysis_provider if provider == provider_name else openai_provider
+            )
+        )
         job_id = catalogue(client, headers, asset_id, {"vlm_provider": provider_name})
         worker.process_next()
     job = client.get(f"/v1/jobs/{job_id}", headers=headers).json()

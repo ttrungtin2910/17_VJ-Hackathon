@@ -3,10 +3,11 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Header, Query
 from sqlalchemy.orm import Session
 
+from garblo.config import Settings, get_settings
 from garblo.database import get_db
 from garblo.dependencies import get_current_user
 from garblo.models import User
-from garblo.recommendations import schemas, service
+from garblo.recommendations import rendering, schemas, service
 
 router = APIRouter(prefix="/recommendations", tags=["recommendations"])
 DB = Annotated[Session, Depends(get_db)]
@@ -50,3 +51,26 @@ def feedback(
     session_id: str, outfit_id: str, payload: schemas.FeedbackRequest, db: DB, user: CurrentUser
 ) -> schemas.FeedbackResponse:
     return service.put_feedback(db, user.id, session_id, outfit_id, payload)
+
+
+@router.get(
+    "/{session_id}/outfits/{outfit_id}/render", response_model=rendering.RenderResponse | None
+)
+def get_outfit_render(session_id: str, outfit_id: str, db: DB, user: CurrentUser):
+    return rendering.get_render(db, user.id, session_id, outfit_id)
+
+
+@router.post(
+    "/{session_id}/outfits/{outfit_id}/render",
+    response_model=rendering.RenderResponse,
+    status_code=202,
+)
+def render_outfit(
+    session_id: str,
+    outfit_id: str,
+    payload: rendering.RenderRequest,
+    db: DB,
+    user: CurrentUser,
+    settings: Settings = Depends(get_settings),
+):
+    return rendering.start_render(db, user.id, session_id, outfit_id, payload, settings)

@@ -271,4 +271,79 @@ def run_analysis_stages(
         metadata["segments"] = _segment(
             worker, snapshot, image, mime, analysis.result.items, ledger, segmentation_url
         )
+    elif (
+        analysis.result.items
+        and snapshot.get("schema_version", 1) == 2
+        and snapshot.get("image_model")
+    ):
+        metadata["segments"] = _generate_component_images(
+            worker, claim, analysis, image, mime, ledger, primary_provider
+        )
     return Analysis(analysis.result, metadata)
+
+
+def _generate_component_images(worker, claim, analysis, image, mime, ledger, primary_provider):
+    image_model = claim.ref.get("image_model")
+    if not image_model:
+        raise AIProviderError("Job thiếu OpenAI image model", "provider_not_configured")
+    generator = primary_provider
+    owns_generator = False
+    if claim.provider != "openai":
+        openai_model = worker.settings.openai_vlm_model or image_model
+        generator = worker.providers.resolve("openai", openai_model, image_model)
+        owns_generator = True
+    generate = getattr(generator, "generate_component_image", None)
+    if not generate:
+        raise AIProviderError("Provider không hỗ trợ tạo ảnh món đồ", "provider_not_supported")
+    previous_provider = ledger.provider
+    previous_stage, previous_model = ledger.stage, ledger.model
+    segments = []
+    try:
+        ledger.provider = "openai"
+        ledger.stage, ledger.model = "component_image", image_model
+        missing = list(enumerate(analysis.result.items))
+        while missing:
+            index, component = missing.pop(0)
+            try:
+                generated = generate(
+                    image=image,
+                    mime_type=mime,
+                    description=component.model_dump(mode="json"),
+                    before_call=ledger.before_call,
+                )
+            except AIProviderError as exc:
+                if exc.code != "invalid_model_output":
+                    raise
+                # Response không phải PNG trong suốt: dành lượt budget tiếp theo để thử lại.
+                missing.append((index, component))
+                continue
+            try:
+                clean, output_mime = sanitize_image(
+                    generated, worker.settings.max_upload_bytes, worker.settings.max_image_pixels
+                )
+            except ValueError:
+                missing.append((index, component))
+                continue
+            if output_mime != "image/png":
+                missing.append((index, component))
+                continue
+            segments.append(
+                {
+                    "candidate_index": index,
+                    "image_bytes": clean,
+                    "mime_type": output_mime,
+                }
+            )
+        if len(segments) != len(analysis.result.items):
+            raise AIProviderError("Số ảnh món đồ không khớp nhận diện", "invalid_model_output")
+        return segments
+    finally:
+        ledger.provider, ledger.stage, ledger.model = (
+            previous_provider,
+            previous_stage,
+            previous_model,
+        )
+        if owns_generator:
+            close = getattr(generator, "close", None)
+            if close:
+                close()

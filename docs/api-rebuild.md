@@ -100,6 +100,16 @@ curl "$API/v1/assets/$ASSET_ID/download" -H "Authorization: Bearer $TOKEN"
 **AND**. Draft không xuất hiện trong wardrobe. Download trả `{url, expires_in_seconds}`;
 URL là bearer capability có hạn dùng, không log/share. Garment dùng `source_asset_id` để xin ảnh.
 
+`DELETE /garments/{garment_id}` trả `204` sau khi xóa món và ảnh gốc/component.
+Nếu món thuộc các bộ phối gợi ý, client phải hiển thị cảnh báo xóa cả bộ phối cùng
+phản hồi và gửi `?delete_recommended_outfits=true`. Thiếu xác nhận (hoặc `false`)
+trả `409` với `recommendation_delete_confirmation_required`, chưa xóa DB/storage.
+Xóa cả outfit chứa món, cascade items/feedback; giữ phiên (có thể rỗng), các outfit
+khác và audit job. Món thuộc `LookItem` hoặc có ảnh dùng chung vẫn bị chặn (`409`).
+Backend flush các thay đổi DB trước khi xóa storage; lỗi ràng buộc còn lại trả
+`409/garment_delete_conflict`. Lỗi storage trả `503/storage_delete_failed`, rollback
+metadata và cho phép thử lại kể cả khi một phần hoặc toàn bộ object ảnh đã mất.
+
 ## 5. Lookbook, approval và feedback
 
 ```bash

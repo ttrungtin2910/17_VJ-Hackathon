@@ -19,7 +19,9 @@ cp .env.sample .env
 ./start-all.sh
 ```
 
-Không ghi đè `.env` đã có. FPT key tùy chọn; để trống giữ OpenAI-only. Script cảnh báo nhưng không tự đổi provider khi lỗi auth/billing/safety/consent. Không cần image-generation model vì slice dùng composition theo quy tắc, không tạo ảnh AI lookbook/VTON.
+Không ghi đè `.env` đã có. FPT key tùy chọn; để trống giữ OpenAI-only. Script cảnh báo nhưng không tự đổi provider khi lỗi auth/billing/safety/consent. Catalogue v2 cần thêm `OPENAI_IMAGE_MODEL` để tạo PNG nền trong suốt cho từng món; sample dùng `gpt-image-1.5`, hỗ trợ [Images Edits](https://developers.openai.com/api/reference/python/resources/images/methods/edit). Quyền truy cập model của tài khoản cần được xác minh riêng.
+
+Với `.env` local đã có từ trước, bổ sung `OPENAI_IMAGE_MODEL=gpt-image-1.5` rồi chạy lại `./start-all.sh` để recreate cả API và worker. Thiếu biến này khi dùng catalogue v2 trả `503/provider_not_configured` trước khi tạo job, dù `/ready` vẫn trả 200. Ảnh đã upload được giữ lại; sau cập nhật cấu hình có thể thử phân tích lại ảnh đó.
 
 Profile mặc định: `gpt-5.4-mini-2026-03-17`, vision + Chat Completions + structured output; không gửi temperature. Đã đối chiếu [tài liệu model chính thức](https://developers.openai.com/api/docs/models/gpt-5.4-mini). Chưa xác minh quyền model của tài khoản hoặc wire-live; không tự thử hàng loạt model khi lỗi. `CATALOGUE_MAX_CALLS`, token/deadline và worker attempts là giới hạn tác vụ, không phải hard billing cap của OpenAI.
 

@@ -16,8 +16,9 @@ from fastapi import (
     UploadFile,
     status,
 )
-from sqlalchemy import cast, func, select
+from sqlalchemy import cast, delete, func, or_, select
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from garblo.ai import AIProviderError
@@ -46,6 +47,8 @@ from garblo.models import (
     new_id,
 )
 from garblo.presets import PRESETS, select_preset
+from garblo.recommendations.models import RecommendationSession, RecommendedItem, RecommendedOutfit
+from garblo.recommendations.service import lock_user
 from garblo.schemas import (
     AICallResponse,
     ApprovalDecisionRequest,
@@ -234,6 +237,7 @@ def upload_asset(
                 MediaAsset.user_id == user.id,
                 MediaAsset.checksum == checksum,
                 MediaAsset.asset_type == asset_type[:40],
+                MediaAsset.status != "deleted",
             )
             .order_by(MediaAsset.created_at)
             .limit(1)
@@ -320,6 +324,11 @@ def get_asset_download(
     asset_id: str, db: DB, user: CurrentUser, settings: Settings = Depends(get_settings)
 ) -> AssetDownloadResponse:
     asset = get_owned_asset_or_404(db, user.id, asset_id)
+    if asset.status == "deleted":
+        raise HTTPException(
+            status_code=410,
+            detail={"code": "asset_deleted", "message": "Ảnh này đã bị xóa khỏi bộ nhớ."},
+        )
     try:
         url = storage_or_503(settings).presign_get(asset.object_key)
     except Exception as exc:
@@ -549,6 +558,140 @@ def update_garment(garment_id: str, payload: GarmentPatch, db: DB, user: Current
     db.commit()
     db.refresh(garment)
     return garment
+
+
+@router.delete("/garments/{garment_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_garment(
+    garment_id: str,
+    db: DB,
+    user: CurrentUser,
+    delete_recommended_outfits: bool = Query(default=False),
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    lock_user(db, user.id)
+    # Cùng thứ tự với recommendation: user -> session -> outfit -> garment.
+    related_outfits = select(RecommendedItem.outfit_id).where(
+        RecommendedItem.garment_id == garment_id
+    )
+    session_ids = list(
+        db.scalars(
+            select(RecommendationSession.id)
+            .where(
+                RecommendationSession.user_id == user.id,
+                RecommendationSession.id.in_(
+                    select(RecommendedOutfit.session_id).where(
+                        RecommendedOutfit.id.in_(related_outfits)
+                    )
+                ),
+            )
+            .order_by(RecommendationSession.id)
+            .with_for_update()
+        )
+    )
+    outfit_ids = list(
+        db.scalars(
+            select(RecommendedOutfit.id)
+            .where(
+                RecommendedOutfit.session_id.in_(session_ids),
+                RecommendedOutfit.id.in_(related_outfits),
+            )
+            .order_by(RecommendedOutfit.id)
+            .with_for_update()
+        )
+    )
+    garment = db.scalar(
+        select(Garment)
+        .where(Garment.id == garment_id, Garment.user_id == user.id)
+        .with_for_update()
+    )
+    if not garment:
+        raise HTTPException(status_code=404, detail="Garment not found")
+
+    if outfit_ids and not delete_recommended_outfits:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "recommendation_delete_confirmation_required",
+                "message": "Cần xác nhận xóa các bộ phối gợi ý chứa món này cùng phản hồi của bạn.",
+            },
+        )
+
+    if db.scalar(select(LookItem.id).where(LookItem.garment_id == garment.id).limit(1)):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "garment_in_look",
+                "message": "Món đồ đã được lưu trong bộ phối nên không thể xóa.",
+            },
+        )
+
+    asset_ids = list(
+        dict.fromkeys(filter(None, [garment.source_asset_id, garment.component_asset_id]))
+    )
+    shared = db.scalar(
+        select(Garment.id)
+        .where(
+            Garment.id != garment.id,
+            or_(
+                Garment.source_asset_id.in_(asset_ids),
+                Garment.component_asset_id.in_(asset_ids),
+            ),
+        )
+        .limit(1)
+    )
+    if shared:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "garment_asset_shared",
+                "message": "Ảnh của món đồ đang được món khác sử dụng nên không thể xóa.",
+            },
+        )
+
+    assets = list(db.scalars(select(MediaAsset).where(MediaAsset.id.in_(asset_ids))))
+    try:
+        candidates = db.scalars(
+            select(GarmentCandidate).where(GarmentCandidate.garment_id == garment.id)
+        )
+        for candidate in candidates:
+            candidate.details_json = {
+                **candidate.details_json,
+                "deleted_garment_id": garment.id,
+            }
+            candidate.garment_id = None
+            candidate.status = "deleted"
+        # DB cascade xóa cả items và feedback; giữ lại phiên và audit job.
+        db.execute(delete(RecommendedOutfit).where(RecommendedOutfit.id.in_(outfit_ids)))
+        db.delete(garment)
+        # Phát hiện liên kết DB bị chặn trước khi xóa bất kỳ object ảnh nào.
+        db.flush()
+        try:
+            storage = storage_or_503(settings)
+            for asset in assets:
+                if asset.status != "deleted":
+                    storage.delete(asset.object_key)
+        except Exception as exc:
+            db.rollback()
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "code": "storage_delete_failed",
+                    "message": "Chưa xóa được ảnh. Món đồ vẫn còn trong tủ, bạn có thể thử lại.",
+                },
+            ) from exc
+        for asset in assets:
+            asset.status = "deleted"
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "garment_delete_conflict",
+                "message": "Món đồ còn được dữ liệu khác sử dụng nên chưa thể xóa. Hãy tải lại và thử lại.",
+            },
+        ) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.post("/lookbooks", response_model=JobCreatedResponse, status_code=status.HTTP_202_ACCEPTED)
