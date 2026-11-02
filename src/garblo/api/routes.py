@@ -304,7 +304,7 @@ def create_wardrobe_search(
     search = document(user_id=user["id"], prompt=payload.prompt.strip(), status="queued", result=None, error_message=None)
     db.wardrobe_searches.insert_one(search)
     job = job_document(user_id=user["id"], job_type="recommendation", input_ref={"search_id": search["id"]})
-    job["model_provider"] = "fpt+openai+qdrant"
+    job["model_provider"] = "fpt_preferred+openai+qdrant"
     db.ai_jobs.insert_one(job)
     return WardrobeSearchCreatedResponse(search_id=search["id"], job_id=job["id"])
 
@@ -431,7 +431,7 @@ def retry_job(job_id: str, db: DB, user: CurrentUser, _: Settings = Depends(requ
         raise HTTPException(status_code=409, detail="Only failed jobs can be retried")
     db.ai_jobs.update_one(
         {"_id": job["_id"]},
-        {"$set": {"status": "queued", "error_code": None, "error_message": None, "started_at": None, "completed_at": None, "updated_at": utcnow()}},
+        {"$set": {"status": "queued", "error_code": None, "error_message": None, "error_retryable": False, "started_at": None, "completed_at": None, "updated_at": utcnow()}},
     )
     return JobCreatedResponse(job_id=job["id"])
 

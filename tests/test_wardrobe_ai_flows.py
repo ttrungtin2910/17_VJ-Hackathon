@@ -13,8 +13,9 @@ from pymongo.database import Database
 from garblo.application.wardrobe import RecommendationService
 from garblo.config import Settings
 from garblo.database import ensure_indexes
-from garblo.domain.entities import DetectedGarment, VectorMatch
+from garblo.domain.entities import DetectedGarment, ParsedOutfitIntent, VectorMatch
 from garblo.infrastructure.fpt import FPTIntentProvider, FPTProviderError, json_object_from_text, text_from_fpt_message
+from garblo.infrastructure.intent import FallbackIntentProvider, OpenAIIntentProvider, OpenAIIntentProviderError
 from garblo.infrastructure.openai_provider import OpenAIWardrobeProvider
 from garblo.infrastructure.qdrant import QdrantVectorStore
 from garblo.models import document, job_document
@@ -81,11 +82,14 @@ class CapturingVectors:
 
 
 class FakeIntent:
-    def parse_intent(self, prompt: str) -> dict[str, Any]:
-        return {
-            "occasion": "weekend", "style": "casual", "colors": [], "formality": "casual",
-            "required_categories": [], "avoid_categories": ["outerwear"], "clarification_needed": False,
-        }
+    def parse_intent(self, prompt: str) -> ParsedOutfitIntent:
+        return ParsedOutfitIntent(
+            intent={
+                "occasion": "weekend", "style": "casual", "colors": [], "formality": "casual",
+                "required_categories": [], "avoid_categories": ["outerwear"], "clarification_needed": False,
+            },
+            provider="fake",
+        )
 
 
 def _settings() -> Settings:
@@ -121,7 +125,8 @@ def test_fpt_intent_request_uses_terra_and_discards_thinking() -> None:
     intent = FPTIntentProvider(_settings(), client=client).parse_intent("black work clothes")
     assert client.path == "/v1/messages"
     assert client.body["model"] == "Azure:gpt-5.6-terra" and client.body["stream"] is True
-    assert intent["occasion"] == "work" and intent["colors"] == ["black"]
+    assert intent.provider == "fpt"
+    assert intent.intent["occasion"] == "work" and intent.intent["colors"] == ["black"]
 
 
 def test_fpt_http_402_is_safe_and_thinking_is_not_persisted() -> None:
@@ -133,9 +138,128 @@ def test_fpt_http_402_is_safe_and_thinking_is_not_persisted() -> None:
             return response
 
     provider = FPTIntentProvider(_settings(), client=Client())
-    with pytest.raises(FPTProviderError, match="HTTP 402") as error:
+    with pytest.raises(FPTProviderError) as error:
         provider.parse_intent("smart casual")
     assert "test-fpt-key" not in str(error.value)
+    assert error.value.error_code == "fpt_http_402"
+    assert error.value.fallback_allowed
+
+
+class CapturingOpenAIIntent:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def parse_intent(self, prompt: str) -> ParsedOutfitIntent:
+        self.calls += 1
+        return ParsedOutfitIntent(
+            intent={
+                "occasion": "work", "style": "smart casual", "colors": ["navy"], "formality": "smart casual",
+                "required_categories": [], "avoid_categories": [], "clarification_needed": False,
+            },
+            provider="openai",
+        )
+
+
+@pytest.mark.parametrize("status_code", [402, 408, 429, 500])
+def test_fpt_availability_errors_fall_back_to_openai(status_code: int) -> None:
+    request = httpx.Request("POST", "https://token-api.fpt.ai/v1/messages")
+
+    class Client:
+        def post(self, *args: Any, **kwargs: Any) -> httpx.Response:
+            return httpx.Response(status_code, request=request, json={"message": "provider error"})
+
+    fallback = CapturingOpenAIIntent()
+    provider = FallbackIntentProvider(
+        _settings(), fpt_provider=FPTIntentProvider(_settings(), client=Client()), openai_provider=fallback
+    )
+    parsed = provider.parse_intent("smart casual work outfit")
+    assert parsed.provider == "openai_fallback"
+    assert parsed.fallback_reason == f"fpt_http_{status_code}"
+    assert fallback.calls == 1
+
+
+def test_fpt_network_error_falls_back_to_openai() -> None:
+    request = httpx.Request("POST", "https://token-api.fpt.ai/v1/messages")
+
+    class Client:
+        def post(self, *args: Any, **kwargs: Any) -> httpx.Response:
+            raise httpx.ConnectError("connection failed", request=request)
+
+    fallback = CapturingOpenAIIntent()
+    provider = FallbackIntentProvider(
+        _settings(), fpt_provider=FPTIntentProvider(_settings(), client=Client()), openai_provider=fallback
+    )
+    parsed = provider.parse_intent("smart casual work outfit")
+    assert parsed.provider == "openai_fallback"
+    assert parsed.fallback_reason == "fpt_network_error"
+    assert fallback.calls == 1
+
+
+@pytest.mark.parametrize("status_code", [401, 403])
+def test_fpt_access_errors_do_not_fall_back(status_code: int) -> None:
+    request = httpx.Request("POST", "https://token-api.fpt.ai/v1/messages")
+
+    class Client:
+        def post(self, *args: Any, **kwargs: Any) -> httpx.Response:
+            return httpx.Response(status_code, request=request, json={"message": "not authorised"})
+
+    fallback = CapturingOpenAIIntent()
+    provider = FallbackIntentProvider(
+        _settings(), fpt_provider=FPTIntentProvider(_settings(), client=Client()), openai_provider=fallback
+    )
+    with pytest.raises(FPTProviderError) as error:
+        provider.parse_intent("smart casual work outfit")
+    assert error.value.error_code == "fpt_auth_or_access_error"
+    assert not error.value.retryable
+    assert fallback.calls == 0
+
+
+def test_fpt_invalid_json_does_not_fall_back() -> None:
+    request = httpx.Request("POST", "https://token-api.fpt.ai/v1/messages")
+
+    class Client:
+        def post(self, *args: Any, **kwargs: Any) -> httpx.Response:
+            return httpx.Response(200, request=request, json={"content": [{"type": "text", "text": "not-json"}]})
+
+    fallback = CapturingOpenAIIntent()
+    provider = FallbackIntentProvider(
+        _settings(), fpt_provider=FPTIntentProvider(_settings(), client=Client()), openai_provider=fallback
+    )
+    with pytest.raises(FPTProviderError) as error:
+        provider.parse_intent("smart casual work outfit")
+    assert error.value.error_code == "fpt_contract_error"
+    assert fallback.calls == 0
+
+
+def test_openai_intent_adapter_returns_normalised_intent() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
+
+        @staticmethod
+        def create(**kwargs: Any) -> Any:
+            content = '{"occasion":"work","colors":["navy"],"avoid_categories":["outerwear"]}'
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+
+    parsed = OpenAIIntentProvider(_settings(), client=Client()).parse_intent("navy office outfit")
+    assert parsed.provider == "openai"
+    assert parsed.intent["occasion"] == "work"
+    assert parsed.intent["avoid_categories"] == ["outerwear"]
+
+
+def test_openai_intent_failure_is_safe() -> None:
+    class Client:
+        def __init__(self) -> None:
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
+
+        @staticmethod
+        def create(**kwargs: Any) -> Any:
+            raise httpx.ConnectError("connection failed", request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"))
+
+    with pytest.raises(OpenAIIntentProviderError) as error:
+        OpenAIIntentProvider(_settings(), client=Client()).parse_intent("smart casual")
+    assert error.value.error_code == "openai_intent_unavailable"
+    assert error.value.retryable
 
 
 def test_ingestion_worker_creates_crop_metadata_and_vectors_idempotently() -> None:
@@ -182,6 +306,85 @@ def test_recommendation_never_returns_a_foreign_or_excluded_garment() -> None:
     assert vectors.last_user_id == "user-1"
     assert result["outfit_garment_ids"] == ["top-1"]
     assert result["missing_categories"] == ["bottom", "shoes"]
+    assert result["intent_provider"] == "fake"
+
+
+def test_recommendation_worker_persists_openai_fallback_provenance() -> None:
+    import mongomock
+
+    database: Database = mongomock.MongoClient().garblo
+    ensure_indexes(database)
+    user_id = "user-1"
+    garment = document(user_id=user_id, category="top", catalog_status="active")
+    search = document(user_id=user_id, prompt="smart casual work outfit", status="queued", result=None, error_message=None)
+    job = job_document(user_id=user_id, job_type="recommendation", input_ref={"search_id": search["id"]})
+    database.garments.insert_one(garment)
+    database.wardrobe_searches.insert_one(search)
+    database.ai_jobs.insert_one(job)
+
+    class FPTUnavailable:
+        def parse_intent(self, prompt: str) -> ParsedOutfitIntent:
+            raise FPTProviderError(
+                "FPT intent service is temporarily unavailable",
+                error_code="fpt_http_402",
+                retryable=True,
+                fallback_allowed=True,
+            )
+
+    fallback = CapturingOpenAIIntent()
+    worker = JobWorker(
+        database,
+        MemoryStorage(),
+        _settings(),
+        intent_provider=FallbackIntentProvider(_settings(), fpt_provider=FPTUnavailable(), openai_provider=fallback),
+        openai_provider=FakeOpenAI(),
+        vectors=CapturingVectors([VectorMatch(garment["id"], 0.98)]),
+    )
+
+    assert worker.process_next()
+    stored_job = database.ai_jobs.find_one({"id": job["id"]})
+    stored_search = database.wardrobe_searches.find_one({"id": search["id"]})
+    assert stored_job["status"] == "succeeded"
+    assert stored_job["model_provider"] == "openai_fallback+openai+qdrant"
+    assert stored_search["status"] == "succeeded"
+    assert stored_search["result"]["intent_provider"] == "openai_fallback"
+    assert stored_search["result"]["intent_fallback_reason"] == "fpt_http_402"
+
+
+def test_recommendation_worker_marks_openai_fallback_failure_safely() -> None:
+    import mongomock
+
+    database: Database = mongomock.MongoClient().garblo
+    ensure_indexes(database)
+    user_id = "user-1"
+    search = document(user_id=user_id, prompt="smart casual work outfit", status="queued", result=None, error_message=None)
+    job = job_document(user_id=user_id, job_type="recommendation", input_ref={"search_id": search["id"]})
+    database.wardrobe_searches.insert_one(search)
+    database.ai_jobs.insert_one(job)
+
+    class FailingIntent:
+        def parse_intent(self, prompt: str) -> ParsedOutfitIntent:
+            raise OpenAIIntentProviderError(
+                "OpenAI intent service is unavailable", error_code="openai_intent_unavailable", retryable=True
+            )
+
+    worker = JobWorker(
+        database,
+        MemoryStorage(),
+        _settings(),
+        intent_provider=FailingIntent(),
+        openai_provider=FakeOpenAI(),
+        vectors=CapturingVectors(),
+    )
+
+    assert worker.process_next()
+    stored_job = database.ai_jobs.find_one({"id": job["id"]})
+    stored_search = database.wardrobe_searches.find_one({"id": search["id"]})
+    assert stored_job["status"] == "failed"
+    assert stored_job["error_code"] == "openai_intent_unavailable"
+    assert stored_job["error_retryable"] is True
+    assert stored_search["status"] == "failed"
+    assert stored_search["error_message"] == "OpenAI intent service is unavailable"
 
 
 def test_openai_provider_is_mockable_for_vision_embeddings_and_synthetic_render() -> None:
@@ -255,6 +458,29 @@ def test_batch_upload_enqueues_one_ingestion_job_per_image(configured_client: Te
     assert database.ai_jobs.count_documents({"job_type": "ingest_asset"}) == 2
     status_response = configured_client.get(f"/v1/uploads/{batch['id']}", headers={"Authorization": f"Bearer {token}"})
     assert status_response.status_code == 200
+
+
+def test_wardrobe_search_requires_only_openai(configured_client: TestClient, database: Database) -> None:
+    token = _register_and_consent(configured_client)
+    response = configured_client.post(
+        "/v1/wardrobe-searches",
+        json={"prompt": "smart casual outfit for work"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 202, response.text
+    job = database.ai_jobs.find_one({"id": response.json()["job_id"]})
+    assert job and job["model_provider"] == "fpt_preferred+openai+qdrant"
+
+
+def test_wardrobe_search_requires_openai(client: TestClient) -> None:
+    token = _register_and_consent(client)
+    response = client.post(
+        "/v1/wardrobe-searches",
+        json={"prompt": "smart casual outfit for work"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 503
+    assert response.json()["detail"] == "OpenAI must be configured for wardrobe search"
 
 
 def test_failed_job_can_be_retried_by_its_owner(configured_client: TestClient, database: Database) -> None:

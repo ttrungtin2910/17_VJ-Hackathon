@@ -24,6 +24,6 @@ def test_live_fpt_intent_and_openai_large_embedding() -> None:
     if not settings.fpt_is_configured or not settings.openai_is_configured:
         pytest.skip("FPT_API_KEY and OPEN_AI_API_KEY are both required")
     intent = FPTIntentProvider(settings).parse_intent("a smart casual outfit for a rainy work day")
-    assert set(intent) >= {"occasion", "avoid_categories", "clarification_needed"}
+    assert set(intent.intent) >= {"occasion", "avoid_categories", "clarification_needed"}
     vector = OpenAIWardrobeProvider(settings).embed_text("navy cotton blazer, smart casual, office")
     assert len(vector) == settings.metadata_embedding_dimensions == 3072

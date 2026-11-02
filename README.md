@@ -4,7 +4,7 @@ FastAPI backend for a private AI wardrobe. MongoDB is the application source of 
 
 ## Local start
 
-1. Copy `.env.example` to `.env`, set non-default local secrets, then set `FPT_API_KEY` and `OPEN_AI_API_KEY`.
+1. Copy `.env.example` to `.env`, set non-default local secrets, then set `OPEN_AI_API_KEY`. `FPT_API_KEY` is optional but preferred for intent parsing.
 2. Start API dependencies and API:
 
 ~~~powershell
@@ -42,6 +42,7 @@ garblo-render-worker
 ## AI configuration
 
 - FPT intent parsing uses `POST /v1/messages`, `FPT_MODEL=Azure:gpt-5.6-terra`, and only consumes response blocks with `type: "text"`. Internal `thinking` blocks are never stored or exposed.
+- Recommendation uses FPT first. For FPT payment/availability failures (`402`, timeout, `408`, `429`, or `5xx`), it falls back to OpenAI `OPENAI_INTENT_MODEL` (default `gpt-4.1-mini`) and records only a safe fallback reason. Invalid FPT credentials, model access, or response contract errors do not fall back.
 - OpenAI vision metadata defaults to `gpt-4.1-mini`; embeddings use `text-embedding-3-large` at 3,072 dimensions; synthetic outfit image edits use `gpt-image-2`.
 - Ingestion uses local Grounding DINO bounding boxes and local SigLIP2 image embeddings. Model weights download only when the ingestion worker starts.
 - The renderer produces a synthetic adult model; it is not virtual try-on of the user.
@@ -52,7 +53,7 @@ garblo-render-worker
 
 - `POST /v1/uploads` with repeated `files` form fields stores up to 20 images and creates one ingestion job per source image.
 - `GET /v1/uploads/{upload_id}` shows batch/job progress.
-- `POST /v1/wardrobe-searches` queues FPT intent parsing plus Qdrant retrieval; `GET /v1/wardrobe-searches/{search_id}` returns normalized intent and recommendations.
+- `POST /v1/wardrobe-searches` queues intent parsing plus Qdrant retrieval; `GET /v1/wardrobe-searches/{search_id}` returns normalized intent, provider provenance, and recommendations.
 - Existing `POST /v1/lookbooks` and `POST /v1/looks/{look_id}/renders` enqueue synthetic outfit renders.
 - All AI operations require an active `ai_processing` consent and enforce user ownership.
 
@@ -69,6 +70,71 @@ curl.exe -X POST "http://localhost:8000/v1/uploads" `
 ~~~
 
 The request must be `multipart/form-data`; do not send a local path or Base64 image text as JSON. The response contains an `upload_id` and one ingestion ID in `job_ids` per uploaded source image.
+
+### Test wardrobe search and outfit render (PowerShell)
+
+Start `recommendation-worker` and `render-worker`, then log in and grant `ai_processing` consent. Set `$token` to the raw `access_token` from login. The search request is asynchronous:
+
+~~~powershell
+$searchPayload = @{
+  prompt = "Outfit nam smart casual di lam, uu tien tong xanh navy va be"
+} | ConvertTo-Json -Compress
+
+$search = Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://localhost:8000/v1/wardrobe-searches" `
+  -Headers @{ Authorization = "Bearer $token" } `
+  -ContentType "application/json; charset=utf-8" `
+  -Body ([System.Text.Encoding]::UTF8.GetBytes($searchPayload))
+
+$searchId = $search.search_id
+do {
+  $result = Invoke-RestMethod `
+    -Uri "http://localhost:8000/v1/wardrobe-searches/$searchId" `
+    -Headers @{ Authorization = "Bearer $token" }
+  Start-Sleep -Seconds 3
+} while ($result.status -in @("queued", "running"))
+
+$result | ConvertTo-Json -Depth 10
+~~~
+
+Use the returned `result.outfit_garment_ids` to create a synthetic-model render. A render accepts one to twenty owned garments, but a result with `missing_categories` is not a complete outfit; select a top, bottom, and shoes from `GET /v1/garments` for a better image. Image rendering invokes the paid OpenAI image provider.
+
+~~~powershell
+$lookPayload = @{
+  title       = "Smart casual work test"
+  garment_ids = @("REPLACE_WITH_A_GARMENT_ID")
+  theme       = "minimal office studio"
+  occasion    = "work"
+  instruction = "Create a smart-casual office outfit with the supplied garments. Use a synthetic adult model."
+} | ConvertTo-Json -Compress
+
+$render = Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://localhost:8000/v1/lookbooks" `
+  -Headers @{ Authorization = "Bearer $token" } `
+  -ContentType "application/json; charset=utf-8" `
+  -Body ([System.Text.Encoding]::UTF8.GetBytes($lookPayload))
+
+do {
+  $job = Invoke-RestMethod `
+    -Uri "http://localhost:8000/v1/jobs/$($render.job_id)" `
+    -Headers @{ Authorization = "Bearer $token" }
+  Start-Sleep -Seconds 3
+} while ($job.status -in @("queued", "running"))
+
+$job | ConvertTo-Json -Depth 10
+~~~
+
+When the render job succeeds, open the private generated image through its signed URL:
+
+~~~powershell
+$assetId = $job.output_ref.generated_asset_id
+$download = Invoke-RestMethod `
+  -Uri "http://localhost:8000/v1/assets/$assetId/download" `
+  -Headers @{ Authorization = "Bearer $token" }
+Start-Process $download.url
+~~~
 
 ## Tests
 

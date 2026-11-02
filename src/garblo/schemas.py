@@ -157,6 +157,7 @@ class JobResponse(APIModel):
     output_ref: dict[str, Any]
     error_code: str | None
     error_message: str | None
+    error_retryable: bool = False
     created_at: datetime
     completed_at: datetime | None
 

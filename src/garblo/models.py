@@ -50,6 +50,7 @@ def job_document(*, user_id: str, job_type: str, input_ref: dict[str, Any]) -> d
         attempts=0,
         error_code=None,
         error_message=None,
+        error_retryable=False,
         started_at=None,
         completed_at=None,
         locked_at=None,

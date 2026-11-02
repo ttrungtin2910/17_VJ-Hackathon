@@ -84,6 +84,7 @@ services:
       FPT_MODEL: ${FPT_MODEL:-Azure:gpt-5.6-terra}
       OPEN_AI_API_KEY: ${OPEN_AI_API_KEY:-}
       OPENAI_VISION_MODEL: ${OPENAI_VISION_MODEL:-gpt-4.1-mini}
+      OPENAI_INTENT_MODEL: ${OPENAI_INTENT_MODEL:-gpt-4.1-mini}
       OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-large}
       OPENAI_IMAGE_MODEL: ${OPENAI_IMAGE_MODEL:-gpt-image-2}
     ports:
@@ -116,6 +117,7 @@ services:
       FPT_MODEL: ${FPT_MODEL:-Azure:gpt-5.6-terra}
       OPEN_AI_API_KEY: ${OPEN_AI_API_KEY:-}
       OPENAI_VISION_MODEL: ${OPENAI_VISION_MODEL:-gpt-4.1-mini}
+      OPENAI_INTENT_MODEL: ${OPENAI_INTENT_MODEL:-gpt-4.1-mini}
       OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-large}
       OPENAI_IMAGE_MODEL: ${OPENAI_IMAGE_MODEL:-gpt-image-2}
       ML_DEVICE: ${ML_DEVICE:-auto}

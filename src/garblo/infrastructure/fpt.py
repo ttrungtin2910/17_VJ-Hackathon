@@ -7,12 +7,25 @@ from typing import Any
 import httpx
 from openai import APIStatusError, OpenAI
 
+from garblo.application.intents import normalise_outfit_intent, outfit_intent_instruction
 from garblo.application.wardrobe import ApplicationError
 from garblo.config import Settings
+from garblo.domain.entities import ParsedOutfitIntent
 
 
 class FPTProviderError(ApplicationError):
     """The FPT contract was unavailable or did not return valid public text."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_code: str = "fpt_contract_error",
+        retryable: bool = False,
+        fallback_allowed: bool = False,
+    ):
+        super().__init__(message, error_code=error_code, retryable=retryable)
+        self.fallback_allowed = fallback_allowed
 
 
 def text_from_fpt_message(payload: dict[str, Any]) -> str:
@@ -47,18 +60,11 @@ class FPTIntentProvider:
 
     def __init__(self, settings: Settings, client: OpenAI | None = None):
         if not settings.fpt_is_configured:
-            raise FPTProviderError("FPT is not configured")
+            raise FPTProviderError("FPT is not configured", error_code="fpt_not_configured")
         self.settings = settings
         self.client = client or OpenAI(api_key=settings.fpt_api_key, base_url=settings.fpt_base_url)
 
-    def parse_intent(self, prompt: str) -> dict[str, Any]:
-        instruction = (
-            "Extract a wardrobe-search intent from the user's request. Return JSON only, with keys: "
-            "occasion (string|null), style (string|null), colors (array of strings), formality (string|null), "
-            "required_categories (array of strings), avoid_categories (array of strings), "
-            "clarification_needed (boolean). Never include reasoning. User request: "
-            + prompt
-        )
+    def parse_intent(self, prompt: str) -> ParsedOutfitIntent:
         try:
             response = self.client.post(
                 "/v1/messages",
@@ -66,37 +72,38 @@ class FPTIntentProvider:
                 body={
                     "model": self.settings.fpt_model,
                     "max_tokens": self.settings.fpt_max_tokens,
-                    "messages": [{"role": "user", "content": instruction}],
+                    "messages": [{"role": "user", "content": outfit_intent_instruction(prompt)}],
                     "stream": True,
                 },
             )
             response.raise_for_status()
-            return self._normalise_intent(json_object_from_text(text_from_fpt_message(response.json())))
+            return ParsedOutfitIntent(
+                intent=normalise_outfit_intent(json_object_from_text(text_from_fpt_message(response.json()))),
+                provider="fpt",
+            )
         except FPTProviderError:
             raise
         except (httpx.HTTPError, APIStatusError) as exc:
             status_code = getattr(getattr(exc, "response", None), "status_code", None)
-            suffix = f" (HTTP {status_code})" if status_code else ""
-            raise FPTProviderError("FPT intent request failed" + suffix) from exc
+            if status_code in {402, 408, 429} or (isinstance(status_code, int) and status_code >= 500):
+                raise FPTProviderError(
+                    "FPT intent service is temporarily unavailable",
+                    error_code=f"fpt_http_{status_code}",
+                    retryable=True,
+                    fallback_allowed=True,
+                ) from exc
+            if status_code in {401, 403}:
+                raise FPTProviderError(
+                    "FPT credentials or model access was rejected",
+                    error_code="fpt_auth_or_access_error",
+                ) from exc
+            if status_code:
+                raise FPTProviderError("FPT intent request was rejected", error_code=f"fpt_http_{status_code}") from exc
+            raise FPTProviderError(
+                "FPT intent service is unavailable",
+                error_code="fpt_network_error",
+                retryable=True,
+                fallback_allowed=True,
+            ) from exc
         except Exception as exc:
-            raise FPTProviderError("FPT intent request failed") from exc
-
-    @staticmethod
-    def _normalise_intent(raw: dict[str, Any]) -> dict[str, Any]:
-        def short_text(value: object) -> str | None:
-            return value.strip()[:120] if isinstance(value, str) and value.strip() else None
-
-        def string_list(value: object) -> list[str]:
-            if not isinstance(value, list):
-                return []
-            return [item.strip()[:80] for item in value if isinstance(item, str) and item.strip()][:12]
-
-        return {
-            "occasion": short_text(raw.get("occasion")),
-            "style": short_text(raw.get("style")),
-            "colors": string_list(raw.get("colors")),
-            "formality": short_text(raw.get("formality")),
-            "required_categories": string_list(raw.get("required_categories")),
-            "avoid_categories": string_list(raw.get("avoid_categories")),
-            "clarification_needed": bool(raw.get("clarification_needed", False)),
-        }
+            raise FPTProviderError("FPT intent request failed", error_code="fpt_request_error") from exc

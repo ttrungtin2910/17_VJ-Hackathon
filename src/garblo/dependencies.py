@@ -47,10 +47,10 @@ def require_ai_configuration(settings: Settings = Depends(get_settings)) -> Sett
 
 
 def require_recommendation_configuration(settings: Settings = Depends(get_settings)) -> Settings:
-    if not settings.openai_is_configured or not settings.fpt_is_configured:
+    if not settings.recommendation_is_configured:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="FPT and OpenAI must be configured for wardrobe search",
+            detail="OpenAI must be configured for wardrobe search",
         )
     return settings
 

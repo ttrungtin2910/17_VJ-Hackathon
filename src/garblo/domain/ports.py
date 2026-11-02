@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from garblo.domain.entities import DetectedGarment, RenderedLook, VectorMatch
+from garblo.domain.entities import DetectedGarment, ParsedOutfitIntent, RenderedLook, VectorMatch
 
 
 class GarmentDetector(Protocol):
@@ -25,7 +25,7 @@ class OpenAIWardrobePort(Protocol):
 
 
 class OutfitIntentPort(Protocol):
-    def parse_intent(self, prompt: str) -> dict[str, Any]: ...
+    def parse_intent(self, prompt: str) -> ParsedOutfitIntent: ...
 
 
 class VectorStore(Protocol):

@@ -13,7 +13,7 @@ from garblo.application.wardrobe import ApplicationError, RecommendationService,
 from garblo.config import Settings, get_settings
 from garblo.database import get_database
 from garblo.domain.ports import GarmentDetector, ImageEmbedder, OpenAIWardrobePort, OutfitIntentPort, VectorStore
-from garblo.infrastructure.fpt import FPTIntentProvider
+from garblo.infrastructure.intent import FallbackIntentProvider
 from garblo.infrastructure.local_ml import GroundingDinoGarmentDetector, SigLIPImageEmbedder
 from garblo.infrastructure.mongo_repository import MongoWardrobeRepository
 from garblo.infrastructure.openai_provider import OpenAIWardrobeProvider
@@ -84,14 +84,32 @@ class JobWorker:
                 output = self._render_look(job)
             else:
                 raise ApplicationError(f"Unsupported job type: {job['job_type']}")
-            updates = {"output_ref": output, "status": "succeeded", "error_code": None, "error_message": None}
+            updates = {
+                "output_ref": output,
+                "status": "succeeded",
+                "error_code": None,
+                "error_message": None,
+                "error_retryable": False,
+            }
+            if job["job_type"] in RECOMMENDATION_JOB_TYPES and isinstance(output.get("intent_provider"), str):
+                updates["model_provider"] = f"{output['intent_provider']}+openai+qdrant"
         except ApplicationError as exc:
             logger.warning("AI job %s failed: %s", job["id"], exc)
-            updates = {"status": "failed", "error_code": "provider_or_model_error", "error_message": str(exc)}
+            updates = {
+                "status": "failed",
+                "error_code": exc.error_code,
+                "error_message": str(exc),
+                "error_retryable": exc.retryable,
+            }
             self._mark_related_failure(job, str(exc))
         except Exception:
             logger.exception("AI job %s failed unexpectedly", job["id"])
-            updates = {"status": "failed", "error_code": "internal_error", "error_message": "The AI job could not be completed"}
+            updates = {
+                "status": "failed",
+                "error_code": "internal_error",
+                "error_message": "The AI job could not be completed",
+                "error_retryable": False,
+            }
             self._mark_related_failure(job, "The AI job could not be completed")
         now = utcnow()
         updates.update({"completed_at": now, "locked_at": None, "updated_at": now})
@@ -153,7 +171,9 @@ class JobWorker:
         if not search:
             raise ApplicationError("Wardrobe search no longer exists")
         service = RecommendationService(
-            self._intent_provider or FPTIntentProvider(self.settings), self._provider(), self._vectors or QdrantVectorStore(self.settings)
+            self._intent_provider or FallbackIntentProvider(self.settings),
+            self._provider(),
+            self._vectors or QdrantVectorStore(self.settings),
         )
         result = service.recommend(
             user_id=job["user_id"], prompt=str(search["prompt"]), garments=self.repository.garments_for_user(job["user_id"])

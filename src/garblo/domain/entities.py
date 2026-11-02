@@ -22,6 +22,15 @@ class VectorMatch:
 
 
 @dataclass(frozen=True)
+class ParsedOutfitIntent:
+    """Normalised search intent with safe provenance for audit and API responses."""
+
+    intent: dict[str, Any]
+    provider: str
+    fallback_reason: str | None = None
+
+
+@dataclass(frozen=True)
 class RenderedLook:
     image_bytes: bytes
     mime_type: str

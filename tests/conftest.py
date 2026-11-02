@@ -42,7 +42,7 @@ def client(database: Database) -> Generator[TestClient, None, None]:
 
 @pytest.fixture()
 def configured_client(database: Database) -> Generator[TestClient, None, None]:
-    """API client whose provider configuration is present but all provider calls remain mocked."""
+    """API client with OpenAI configured; FPT remains optional for recommendation requests."""
     def override_db() -> Database:
         return database
 
@@ -52,7 +52,7 @@ def configured_client(database: Database) -> Generator[TestClient, None, None]:
             mongodb_uri="mongodb://unused",
             jwt_secret_key="test-secret-key-that-is-long-enough",
             open_ai_api_key="test-openai-key",
-            fpt_api_key="test-fpt-key",
+            fpt_api_key=None,
             s3_endpoint_url="http://unused",
             s3_access_key="test",
             s3_secret_key="test-secret",

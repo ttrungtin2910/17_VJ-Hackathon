@@ -39,6 +39,7 @@ class Settings(BaseSettings):
 
     open_ai_api_key: str | None = None
     openai_vision_model: str = "gpt-4.1-mini"
+    openai_intent_model: str = "gpt-4.1-mini"
     openai_embedding_model: str = "text-embedding-3-large"
     openai_image_model: str = "gpt-image-2"
     metadata_embedding_dimensions: int = 3_072
@@ -59,7 +60,12 @@ class Settings(BaseSettings):
 
     @property
     def ai_is_configured(self) -> bool:
-        return self.openai_is_configured and self.fpt_is_configured
+        return self.openai_is_configured
+
+    @property
+    def recommendation_is_configured(self) -> bool:
+        """OpenAI is the required provider; FPT is an optional primary intent provider."""
+        return self.openai_is_configured
 
     @property
     def openai_is_configured(self) -> bool:

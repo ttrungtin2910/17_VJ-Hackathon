@@ -10,6 +10,11 @@ from garblo.domain.ports import OpenAIWardrobePort, OutfitIntentPort, VectorStor
 class ApplicationError(RuntimeError):
     """A safe, user-facing failure raised by an application use case."""
 
+    def __init__(self, message: str, *, error_code: str = "provider_or_model_error", retryable: bool = False):
+        super().__init__(message)
+        self.error_code = error_code
+        self.retryable = retryable
+
 
 def normalise_metadata(raw: dict[str, Any], fallback_category: str) -> dict[str, Any]:
     """Keep provider output bounded and stable before it reaches MongoDB or Qdrant."""
@@ -63,7 +68,8 @@ class RecommendationService:
     def recommend(
         self, *, user_id: str, prompt: str, garments: Iterable[dict[str, Any]], limit: int = 12
     ) -> dict[str, Any]:
-        intent = self.intent_parser.parse_intent(prompt)
+        parsed = self.intent_parser.parse_intent(prompt)
+        intent = parsed.intent
         query_text = json.dumps(intent, ensure_ascii=False, sort_keys=True)
         matches = self.vectors.search_metadata(
             user_id=user_id, vector=self.embeddings.embed_text(query_text), limit=limit
@@ -82,8 +88,9 @@ class RecommendationService:
         selected = self._select_complete_outfit(candidates)
         selected_ids = {item["garment"]["id"] for item in selected}
         missing_categories = self._missing_categories(selected)
-        return {
+        result = {
             "normalized_intent": intent,
+            "intent_provider": parsed.provider,
             "candidates": [
                 {"garment_id": item["garment"]["id"], "score": item["score"]} for item in candidates
             ],
@@ -92,6 +99,9 @@ class RecommendationService:
             "rationale": self._rationale(intent, selected, missing_categories),
             "used_candidate_ids": sorted(selected_ids),
         }
+        if parsed.fallback_reason:
+            result["intent_fallback_reason"] = parsed.fallback_reason
+        return result
 
     @staticmethod
     def _select_complete_outfit(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
