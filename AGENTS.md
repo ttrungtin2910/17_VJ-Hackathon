@@ -2,6 +2,14 @@
 
 Các đường dẫn và lệnh bên dưới tính từ `garblo-backend/`; chạy Git tại đây, không ở gốc workspace.
 
+## Cấu trúc và quy ước đóng góp
+
+- Mã ứng dụng nằm trong `src/garblo/`; kiểm thử trong `tests/`; migration Alembic trong `migrations/versions/`; tài liệu API, kiến trúc và vận hành trong `docs/`. Worker dùng chung package với API nhưng chạy process riêng.
+- Dùng Python 3.12+, thụt lề 4 dấu cách, giữ kiểu và cách đặt tên theo PEP 8: `snake_case` cho module/hàm/biến, `PascalCase` cho lớp, `UPPER_SNAKE_CASE` cho hằng. Ruff là nguồn chuẩn cho lint và format (dòng tối đa 100 ký tự).
+- Đặt tên kiểm thử `test_*.py` và hàm `test_*`; thêm kiểm thử cho thay đổi hành vi, quyền truy cập, consent, xử lý lỗi và tính nhất quán dữ liệu. Thay đổi schema cần migration mới; không sửa migration đã phát hành.
+- Lịch sử dùng tiền tố Conventional Commits như `feat(backend):`, `fix(backend):`, `docs(backend):`, `refactor(tooling):`. Giữ tiêu đề ngắn, nêu phạm vi và lý do thay đổi; mỗi repo có lịch sử Git riêng.
+- PR cần mô tả hành vi thay đổi, cấu hình/migration có liên quan, lệnh kiểm tra đã chạy và kết quả; liên kết issue nếu có. Không đưa bí mật, token hoặc dữ liệu người dùng vào diff, log hay tài liệu.
+
 ## Chạy và cấu hình
 
 - Python >=3.12: tạo/kích hoạt virtualenv theo `README.md`, rồi `python -m pip install -e '.[dev]'`; chép `.env.example` thành `.env`, cấu hình DB/S3/JWT; `alembic upgrade head`, rồi `uvicorn garblo.main:app --reload`. Chạy **`garblo-worker` ở process riêng**. Bucket local mới có thể tạo bằng `python -m garblo.storage_init`.
