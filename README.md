@@ -6,9 +6,6 @@ Không có fallback chéo provider, Redis/Celery hoặc ảnh giả khi thiếu 
 
 ## Chạy local — Python >= 3.12
 
-Tự động commit local sau lượt OpenCode và kiểm tra/push khi đủ 3 commit/repo:
-xem [AutoGit FE/BE](tools/opencode-autogit/README.md). Mặc định cài ở chế độ dry-run.
-
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
