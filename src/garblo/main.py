@@ -27,6 +27,8 @@ def health() -> dict[str, object]:
         "status": "ok",
         "environment": settings.app_env,
         "ai_configured": settings.ai_is_configured,
+        "openai_configured": settings.openai_is_configured,
+        "fpt_configured": settings.fpt_is_configured,
         "storage_configured": settings.storage_is_configured,
     }
 

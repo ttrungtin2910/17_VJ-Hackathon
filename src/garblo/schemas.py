@@ -84,6 +84,41 @@ class GarmentResponse(APIModel):
     wear_count: int
     catalog_status: str
     created_at: datetime
+    original_asset_id: str | None = None
+    crop_asset_id: str | None = None
+    detection: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
+    vector_status: str | None = None
+
+
+class UploadBatchResponse(APIModel):
+    id: str
+    status: str
+    asset_ids: list[str]
+    job_ids: list[str]
+    total_count: int
+    processed_count: int
+    failed_count: int
+    created_at: datetime
+
+
+class WardrobeSearchRequest(BaseModel):
+    prompt: str = Field(min_length=2, max_length=2_000)
+
+
+class WardrobeSearchResponse(APIModel):
+    id: str
+    prompt: str
+    status: str
+    result: dict[str, Any] | None = None
+    error_message: str | None = None
+    created_at: datetime
+
+
+class WardrobeSearchCreatedResponse(BaseModel):
+    search_id: str
+    job_id: str
+    status: Literal["queued"] = "queued"
 
 
 class LookbookCreateRequest(BaseModel):

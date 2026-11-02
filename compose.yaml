@@ -1,0 +1,177 @@
+services:
+  mongodb:
+    image: mongo:8.0
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:-garblo}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:-garblo-local-password}
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb-data:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --username $$MONGO_INITDB_ROOT_USERNAME --password $$MONGO_INITDB_ROOT_PASSWORD --authenticationDatabase admin --eval 'db.runCommand({ ping: 1 }).ok' | grep 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  rustfs:
+    image: rustfs/rustfs:latest
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY:-garblo}
+      RUSTFS_SECRET_KEY: ${S3_SECRET_KEY:-garblo-local-storage-secret}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - rustfs-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/6333'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  storage-init:
+    build:
+      context: .
+      target: bootstrap
+    environment:
+      S3_ENDPOINT_URL: http://rustfs:9000
+      S3_PRESIGN_ENDPOINT_URL: http://localhost:9000
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-garblo}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-garblo-local-storage-secret}
+      S3_BUCKET: ${S3_BUCKET:-garblo-assets}
+      S3_REGION: ${S3_REGION:-us-east-1}
+    depends_on:
+      rustfs:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      target: api
+    environment:
+      APP_ENV: development
+      MONGODB_URI: mongodb://${MONGO_INITDB_ROOT_USERNAME:-garblo}:${MONGO_INITDB_ROOT_PASSWORD:-garblo-local-password}@mongodb:27017/${MONGODB_DATABASE:-garblo}?authSource=admin
+      MONGODB_DATABASE: ${MONGODB_DATABASE:-garblo}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-replace-with-a-long-random-secret-before-production}
+      ENABLE_API_MOCK_UI: "true"
+      S3_ENDPOINT_URL: http://rustfs:9000
+      S3_PRESIGN_ENDPOINT_URL: http://localhost:9000
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-garblo}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-garblo-local-storage-secret}
+      S3_BUCKET: ${S3_BUCKET:-garblo-assets}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      QDRANT_URL: http://qdrant:6333
+      FPT_API_KEY: ${FPT_API_KEY:-}
+      FPT_BASE_URL: ${FPT_BASE_URL:-https://token-api.fpt.ai}
+      FPT_MODEL: ${FPT_MODEL:-Azure:gpt-5.6-terra}
+      OPEN_AI_API_KEY: ${OPEN_AI_API_KEY:-}
+      OPENAI_VISION_MODEL: ${OPENAI_VISION_MODEL:-gpt-4.1-mini}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-large}
+      OPENAI_IMAGE_MODEL: ${OPENAI_IMAGE_MODEL:-gpt-image-2}
+    ports:
+      - "8000:8000"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
+
+  ingestion-worker:
+    build:
+      context: .
+      target: ml-worker
+    profiles: ["ml"]
+    command: ["garblo-ingestion-worker"]
+    environment: &worker-env
+      MONGODB_URI: mongodb://${MONGO_INITDB_ROOT_USERNAME:-garblo}:${MONGO_INITDB_ROOT_PASSWORD:-garblo-local-password}@mongodb:27017/${MONGODB_DATABASE:-garblo}?authSource=admin
+      MONGODB_DATABASE: ${MONGODB_DATABASE:-garblo}
+      S3_ENDPOINT_URL: http://rustfs:9000
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-garblo}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-garblo-local-storage-secret}
+      S3_BUCKET: ${S3_BUCKET:-garblo-assets}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      QDRANT_URL: http://qdrant:6333
+      FPT_API_KEY: ${FPT_API_KEY:-}
+      FPT_BASE_URL: ${FPT_BASE_URL:-https://token-api.fpt.ai}
+      FPT_MODEL: ${FPT_MODEL:-Azure:gpt-5.6-terra}
+      OPEN_AI_API_KEY: ${OPEN_AI_API_KEY:-}
+      OPENAI_VISION_MODEL: ${OPENAI_VISION_MODEL:-gpt-4.1-mini}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-large}
+      OPENAI_IMAGE_MODEL: ${OPENAI_IMAGE_MODEL:-gpt-image-2}
+      ML_DEVICE: ${ML_DEVICE:-auto}
+    depends_on: &ml-worker-depends
+      mongodb:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
+
+  ingestion-worker-gpu:
+    build:
+      context: .
+      target: ml-worker
+    profiles: ["ml-gpu"]
+    command: ["garblo-ingestion-worker"]
+    environment: *worker-env
+    depends_on: *ml-worker-depends
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  recommendation-worker:
+    build:
+      context: .
+      target: worker
+    profiles: ["ai"]
+    command: ["garblo-recommendation-worker"]
+    environment: *worker-env
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
+
+  render-worker:
+    build:
+      context: .
+      target: worker
+    profiles: ["ai"]
+    command: ["garblo-render-worker"]
+    environment: *worker-env
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
+
+volumes:
+  mongodb-data:
+  rustfs-data:
+  qdrant-data:

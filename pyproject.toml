@@ -9,38 +9,49 @@ description = "Garblo AI lookbook backend"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-  "alembic>=1.14,<2",
   "boto3>=1.35,<2",
+  "bcrypt>=4.1,<5",
   "email-validator>=2.2,<3",
   "fastapi>=0.115,<1",
   "httpx>=0.28,<1",
-  "langchain-openai>=0.3,<1",
   "openai>=1.60,<2",
   "passlib[bcrypt]>=1.7,<2",
-  "psycopg[binary]>=3.2,<4",
+  "pymongo>=4.10,<5",
   "pydantic-settings>=2.7,<3",
   "python-jose[cryptography]>=3.3,<4",
   "python-multipart>=0.0.18,<1",
-  "sqlalchemy>=2.0,<3",
   "uvicorn[standard]>=0.34,<1",
 ]
 
 [project.optional-dependencies]
+ml = [
+  "Pillow>=10.4,<12",
+  "torch>=2.5,<3",
+  "transformers>=4.48,<5",
+]
+
 dev = [
   "pytest>=8.3,<9",
   "pytest-cov>=6,<7",
+  "mongomock>=4.3,<5",
   "ruff>=0.9,<1",
 ]
 
 [project.scripts]
 garblo-api = "garblo.main:run"
 garblo-worker = "garblo.worker:run"
+garblo-ingestion-worker = "garblo.worker:run_ingestion"
+garblo-recommendation-worker = "garblo.worker:run_recommendation"
+garblo-render-worker = "garblo.worker:run_render"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/garblo"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "live_ai: makes an opt-in request to configured FPT or OpenAI providers",
+]
 
 [tool.ruff]
 line-length = 100
