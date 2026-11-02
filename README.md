@@ -56,6 +56,20 @@ garblo-render-worker
 - Existing `POST /v1/lookbooks` and `POST /v1/looks/{look_id}/renders` enqueue synthetic outfit renders.
 - All AI operations require an active `ai_processing` consent and enforce user ownership.
 
+### Upload images with curl (PowerShell)
+
+Log in through `POST /v1/auth/login`, create an `ai_processing` consent through `POST /v1/consents`, then replace `YOUR_ACCESS_TOKEN` below with the returned `access_token`.
+
+~~~powershell
+curl.exe -X POST "http://localhost:8000/v1/uploads" `
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" `
+  -F "files=@C:\Users\admin\Downloads\shirt.jpg;type=image/jpeg" `
+  -F "files=@C:\Users\admin\Downloads\trousers.png;type=image/png" `
+  -F "asset_type=garment_photo"
+~~~
+
+The request must be `multipart/form-data`; do not send a local path or Base64 image text as JSON. The response contains an `upload_id` and one ingestion ID in `job_ids` per uploaded source image.
+
 ## Tests
 
 ~~~powershell
