@@ -20,6 +20,9 @@ Trả `201 SessionResponse` gồm `id`, `context`, `location`, `engine_version`,
 - Event/style bắt buộc; weather nullable, transports mặc định []. Các IDs giống frontend
   `src/data/contracts/types.ts`. Chọn `other` phải có `custom` không trống.
 - `location` optional ở request root: chỉ snapshot text thủ công, chưa suy luận vị trí/thời tiết.
+- Có thể gửi thêm `prompt` tối đa 1000 ký tự để ưu tiên retrieval món trong tủ. Prompt được
+  lưu trong session; khi có consent và OpenAI embedding model, backend dùng semantic similarity,
+  nếu không thì dùng từ khóa trên retrieval text. Các điều kiện outfit vẫn do rule engine kiểm tra.
 - Cùng user/key và cùng nội dung trả cùng session IDs, không phối lại. Key dùng cho nội dung
   khác trả 409. Replay đọc trạng thái hiện tại của cùng session, gồm edits/feedback nếu đã có.
 - Tối đa 3 bộ, không bắt buộc đủ 3. Tủ thiếu đồ trả danh sách trống/lý do/nhóm đồ thiếu,
@@ -33,6 +36,16 @@ Mỗi outfit có `id`, `session_id`, `rank`, `revision`, `items`, `score`, `brea
 `explanation`, `features_snapshot`, `feedback`. Mỗi `items[]` chứa `garment_id`, `role`,
 snapshot metadata và source/component asset IDs. Xin URL ảnh qua download API hiện có.
 Không có ảnh AI/try-on mới; frontend có thể dựng composition từ chính ảnh các món.
+
+## Retrieval theo yêu cầu stylist
+
+Request có thể thêm `prompt` tối đa 1000 ký tự. Backend lưu prompt trong session, xếp hạng
+garment theo embedding và từ khóa, sau đó gửi shortlist qua rule engine hiện tại để tạo outfit.
+Garment lưu `retrieval_json`: mô tả chuẩn hóa từ metadata xác nhận, embedding, model/version và
+trạng thái. Commit candidate hoặc PATCH metadata cập nhật mô tả và enqueue worker tạo embedding.
+Món cũ được backfill khi có request prompt. Vector nằm trong JSONB; cosine tính trong ứng dụng.
+Prompt embedding chỉ gọi OpenAI khi có consent và `OPENAI_EMBEDDING_MODEL`; nếu không khả dụng,
+retrieval dùng từ khóa. Engine vẫn kiểm tra vai trò, thời tiết và độ đầy đủ của outfit.
 
 ## 2. Ranking và personalization
 

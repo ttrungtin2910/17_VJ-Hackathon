@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import ForeignKey, Integer, Numeric, String, UniqueConstraint
+from sqlalchemy import ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from garblo.database import Base
@@ -21,6 +21,8 @@ class RecommendationSession(Timestamped, Base):
     request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     context_json: Mapped[dict[str, Any]] = mapped_column(JsonType, nullable=False)
     location: Mapped[str | None] = mapped_column(String(200))
+    request_text: Mapped[str | None] = mapped_column(Text)
+    retrieval_query: Mapped[str | None] = mapped_column(Text)
     engine_version: Mapped[str] = mapped_column(String(40), nullable=False)
     weights_snapshot: Mapped[dict[str, float]] = mapped_column(JsonType, nullable=False)
     reason: Mapped[str | None] = mapped_column(String(240))

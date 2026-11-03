@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr | None = None
     openai_vlm_model: str | None = None
     openai_image_model: str | None = None
+    openai_embedding_model: str | None = "text-embedding-3-small"
     fpt_vlm_api_key: SecretStr | None = None
     fpt_vlm_base_url: str = "https://mkp-api.fptcloud.com/v1"
     fpt_vlm_model: str = "Qwen2.5-VL-7B-Instruct"
@@ -100,6 +101,7 @@ class Settings(BaseSettings):
         "fpt_vlm_api_key",
         "openai_vlm_model",
         "openai_image_model",
+        "openai_embedding_model",
         "catalogue_screening_model",
         "catalogue_escalation_model",
         "fpt_screening_model",

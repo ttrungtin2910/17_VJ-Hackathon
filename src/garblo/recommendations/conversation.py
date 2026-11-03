@@ -181,10 +181,12 @@ def _provider_error(exc: HTTPException) -> AIProviderError:
     return AIProviderError("Không thể áp dụng thay đổi trang phục.", code)
 
 
-def _response_format(native: bool) -> dict:
+def _response_format(
+    native: bool, schema_model: type[BaseModel] = EditIntent, name: str = "stylist_edit_v1"
+) -> dict:
     if not native:
         return {"type": "json_object"}
-    schema = EditIntent.model_json_schema()
+    schema = schema_model.model_json_schema()
 
     def strict(node: Any) -> None:
         if isinstance(node, dict):
@@ -201,19 +203,34 @@ def _response_format(native: bool) -> dict:
     strict(schema)
     return {
         "type": "json_schema",
-        "json_schema": {"name": "stylist_edit_v1", "strict": True, "schema": schema},
+        "json_schema": {"name": name, "strict": True, "schema": schema},
     }
 
 
-def _infer(provider, ledger, ref: dict, data: dict) -> str:
+def _infer(
+    provider,
+    ledger,
+    ref: dict,
+    data: dict,
+    *,
+    prompt: str = INTENT_PROMPT,
+    schema_model: type[BaseModel] = EditIntent,
+) -> str:
+    if schema_model is not EditIntent:
+        # JSON mode cũng cần schema trong prompt; response_format chỉ ép JSON hợp lệ.
+        prompt += "\nJSON Schema:\n" + json.dumps(
+            schema_model.model_json_schema(), ensure_ascii=False
+        )
     options = {
         "model": provider.model,
         "max_completion_tokens": 1024,
         "messages": [
-            {"role": "system", "content": INTENT_PROMPT},
+            {"role": "system", "content": prompt},
             {"role": "user", "content": json.dumps(data, ensure_ascii=False)},
         ],
-        "response_format": _response_format(ref.get("native_structured_output") is True),
+        "response_format": _response_format(
+            ref.get("native_structured_output") is True, schema_model
+        ),
     }
     if ref.get("supports_temperature") is True:
         options["temperature"] = 0

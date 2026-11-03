@@ -190,3 +190,15 @@ Upload/job cũ không có chính sách này không bị tự động dọn.
 Xóa garment dùng ảnh component riêng, không chặn chỉ vì các món khác dùng chung nguồn.
 Ảnh nguồn legacy chỉ được xóa theo thao tác xóa món khi không còn món hoặc nháp cần nó.
 Candidate `status=deleted` vẫn phục vụ audit; frontend loại khỏi trình review.
+
+## Thành tựu và lượt mặc
+
+Yêu cầu JWT, chỉ truy cập dữ liệu chính chủ; không gọi AI.
+
+- `GET /v1/impact?timezone=Asia%2FTokyo`: KPI hiện tại, lịch sử wear, huy hiệu bền vững và ba nhiệm vụ tuần (3 ngày, 2 outfit, 5 món). Tuần thứ Hai–Chủ nhật; timezone IANA bắt buộc.
+- `GET /v1/wear-events?limit=50&offset=0`: lịch sử mới nhất trước, limit 1–100.
+- `POST /v1/recommendations/{session_id}/outfits/{outfit_id}/wear-events`: body `{ "worn_on": "2026-11-03", "timezone": "Asia/Tokyo", "expected_revision": 1 }`. Trả `{ "event": { "id", "session_id", "outfit_id", "revision", "item_ids", "worn_on", "timezone", "created_at" }, "new_achievements": [] }` (tên field trong ví dụ event mô tả các khóa).
+- Lần đầu 201; duplicate user/outfit/ngày trả 200 cùng event, không thưởng lại. 404 sai quyền/liên kết; 409 revision stale hoặc outfit không còn hợp lệ; 422 ngày tương lai/ngày hoặc timezone sai.
+- Server snapshot item IDs; unique constraint và user lock tuần tự hóa ghi đồng thời. Transaction cập nhật wear_count, last_worn_at, huy hiệu và nhiệm vụ. Like/approval không tăng wear.
+- Xóa garment/outfit không xóa lịch sử/huy hiệu; xóa user xóa cả hai. Tỷ lệ tận dụng chỉ tính giao của món từng mặc với tủ hiện tại.
+- Migration `20261103_0007` nối `0006`, khởi tạo thành tựu từ dữ liệu còn tồn tại, không tạo wear lịch sử. Deploy migration/API trước frontend.

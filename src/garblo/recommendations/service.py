@@ -142,6 +142,8 @@ def session_response(
         id=session.id,
         context=schemas.RecommendationContext.model_validate(session.context_json),
         location=session.location,
+        prompt=session.request_text,
+        retrieval_query=session.retrieval_query,
         engine_version=session.engine_version,
         weights_snapshot=session.weights_snapshot,
         outfits=[outfit_response(db, user_id, outfit) for outfit in outfits],
@@ -153,7 +155,15 @@ def session_response(
 
 
 def create_session(
-    db: Session, user_id: str, payload: schemas.CreateSessionRequest, idempotency_key: str
+    db: Session,
+    user_id: str,
+    payload: schemas.CreateSessionRequest,
+    idempotency_key: str,
+    query_embedding: list[float] | None = None,
+    embedding_model: str | None = None,
+    retrieval_query: str | None = None,
+    *,
+    commit: bool = True,
 ) -> schemas.SessionResponse:
     if not idempotency_key.strip() or len(idempotency_key) > 200:
         fail(422, "invalid_idempotency_key", "Idempotency-Key phải có từ 1 đến 200 ký tự.")
@@ -170,16 +180,38 @@ def create_session(
         if existing.request_hash != request_hash:
             fail(409, "idempotency_key_reused", "Khóa này đã dùng cho yêu cầu khác.")
         response = session_response(db, user_id, existing)
-        db.commit()
+        if commit:
+            db.commit()
         return response
     weights = personalization_weights(db, user_id)
-    result = engine.recommend(owned_wardrobe(db, user_id, lock=True), payload.context, weights)
+    wardrobe = owned_wardrobe(db, user_id, lock=True)
+    if payload.prompt:
+        from garblo.recommendations.retrieval import rank_garments
+
+        garments = list(
+            db.scalars(
+                select(Garment)
+                .where(Garment.user_id == user_id, Garment.catalog_status == "active")
+                .order_by(Garment.id)
+            )
+        )
+        ranked = rank_garments(
+            garments,
+            retrieval_query or payload.prompt,
+            query_embedding,
+            embedding_model=embedding_model,
+        )
+        ranked_ids = {item.id for item in ranked}
+        wardrobe = [item for item in wardrobe if item.garment_id in ranked_ids]
+    result = engine.recommend(wardrobe, payload.context, weights)
     session = RecommendationSession(
         user_id=user_id,
         idempotency_key=idempotency_key,
         request_hash=request_hash,
         context_json=payload.context.model_dump(mode="json"),
         location=payload.location,
+        request_text=payload.prompt,
+        retrieval_query=retrieval_query or payload.prompt,
         engine_version=engine.ENGINE_VERSION,
         weights_snapshot=weights,
         reason=result.reason,
@@ -210,8 +242,12 @@ def create_session(
                 )
             )
     db.flush()
+    from garblo.impact import sync_progress
+
+    sync_progress(db, user_id)
     response = session_response(db, user_id, session)
-    db.commit()
+    if commit:
+        db.commit()
     return response
 
 

@@ -235,6 +235,14 @@ class JobWorker:
                     "schema_version", 1
                 ):
                     raise AIProviderError("Schema không khớp snapshot job", "invalid_model_output")
+            elif claim.job_type == "stylist":
+                from garblo.recommendations.stylist import plan_turn
+
+                ledger = CallLedger(self, claim)
+                ledger.stage = "intent"
+                result = plan_turn(self.db, claim.user_id, claim.ref, provider, ledger)
+                ledger.finish_unknown()
+                ledger.ensure_deadline()
             elif claim.job_type == "recommendation_edit":
                 from garblo.recommendations.conversation import plan_edit
 
@@ -244,6 +252,35 @@ class JobWorker:
                 provider.on_validation = ledger.on_validation
                 result = plan_edit(self.db, claim.user_id, claim.ref, provider, ledger)
                 ledger.finish_unknown()
+                ledger.ensure_deadline()
+            elif claim.job_type == "garment_embedding":
+                ledger = CallLedger(self, claim)
+                ledger.stage = "embedding"
+                ledger.model = effective.ref["model"]
+                ledger.provider = effective.provider
+                garment = self.db.scalar(
+                    select(Garment).where(
+                        Garment.id == claim.ref.get("garment_id"),
+                        Garment.user_id == claim.user_id,
+                    )
+                )
+                if not garment:
+                    raise AIProviderError("Món đồ không còn tồn tại", "source_not_found")
+                profile = garment.retrieval_json or {}
+                if not profile.get("text"):
+                    raise AIProviderError("Món đồ thiếu mô tả retrieval", "invalid_model_output")
+                ledger.before_call()
+                try:
+                    response = provider.client.embeddings.create(
+                        model=effective.ref["model"], input=profile["text"]
+                    )
+                    vector = response.data[0].embedding
+                    usage = response.usage.model_dump() if response.usage else {}
+                    ledger.on_result(self._safe_usage(usage), int((time.monotonic() - processing_started) * 1000))
+                except Exception as exc:
+                    ledger.finish_unknown("provider_request_error")
+                    raise AIProviderError("Không tạo được embedding", "provider_request_error") from exc
+                result = {"garment_id": garment.id, "embedding": vector, "model": effective.ref["model"], "text": profile["text"]}
                 ledger.ensure_deadline()
             elif claim.job_type in {"lookbook", "variation"}:
                 result = self._render(claim, provider)
@@ -257,10 +294,30 @@ class JobWorker:
                 return True
             if not active_ai_consent(self.db, claim.user_id):
                 raise AIProviderError("Consent đã bị rút khi đang xử lý", "consent_revoked")
-            if claim.job_type == "recommendation_edit":
+            if claim.job_type == "stylist":
+                from garblo.recommendations.stylist import save_turn
+
+                output = save_turn(self.db, claim.user_id, claim.ref, result)
+            elif claim.job_type == "recommendation_edit":
                 from garblo.recommendations.conversation import save_edit
 
                 output = save_edit(self.db, claim.user_id, claim.ref, result)
+            elif claim.job_type == "garment_embedding":
+                garment = self.db.scalar(
+                    select(Garment)
+                    .where(Garment.id == claim.ref.get("garment_id"), Garment.user_id == claim.user_id)
+                    .with_for_update()
+                )
+                if garment:
+                    profile = garment.retrieval_json or {}
+                    if profile.get("text") == result["text"]:
+                        garment.retrieval_json = {
+                            **profile,
+                            "embedding": result["embedding"],
+                            "embedding_model": result["model"],
+                            "status": "ready",
+                        }
+                output = {"garment_id": result["garment_id"], "status": "ready"}
             elif isinstance(result, Analysis):
                 output = self._save_analysis(claim, result)
             else:

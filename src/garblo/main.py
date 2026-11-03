@@ -8,9 +8,11 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from garblo.api.routes import router
 from garblo.config import get_settings
+from garblo.impact import router as impact_router
 from garblo.local_runtime import check_runtime
 from garblo.recommendations.conversation_routes import router as conversation_router
 from garblo.recommendations.routes import router as recommendation_router
+from garblo.recommendations.stylist_routes import router as stylist_router
 
 settings = get_settings()
 app = FastAPI(title=settings.app_name, version="0.1.0")
@@ -21,9 +23,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(impact_router, prefix=settings.api_v1_prefix)
 app.include_router(router, prefix=settings.api_v1_prefix)
 app.include_router(recommendation_router, prefix=settings.api_v1_prefix)
 app.include_router(conversation_router, prefix=settings.api_v1_prefix)
+app.include_router(stylist_router, prefix=settings.api_v1_prefix)
 
 
 @app.exception_handler(RequestValidationError)

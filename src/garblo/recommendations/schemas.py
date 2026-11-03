@@ -69,6 +69,7 @@ class RecommendationContext(StrictModel):
 class CreateSessionRequest(StrictModel):
     context: RecommendationContext
     location: str | None = Field(default=None, max_length=200)
+    prompt: str | None = Field(default=None, min_length=1, max_length=1000)
 
 
 class EditConstraints(StrictModel):
@@ -145,6 +146,8 @@ class SessionResponse(StrictModel):
     id: str
     context: RecommendationContext
     location: str | None
+    prompt: str | None = None
+    retrieval_query: str | None = None
     engine_version: str
     weights_snapshot: dict[str, float]
     outfits: list[OutfitResponse]

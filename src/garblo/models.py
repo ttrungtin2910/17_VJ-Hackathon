@@ -135,6 +135,7 @@ class Garment(Timestamped, Base):
     component_asset_id: Mapped[str | None] = mapped_column(
         ForeignKey("media_assets.id", ondelete="RESTRICT")
     )
+    retrieval_json: Mapped[dict[str, Any] | None] = mapped_column(JsonType)
 
 
 class Lookbook(Timestamped, Base):
@@ -295,4 +296,5 @@ class TasteMatch(Timestamped, Base):
 
 
 # Đăng ký metadata cho Alembic/create_all, không ghép recommendation vào Look.
+from garblo import impact_models  # noqa: E402,F401
 from garblo.recommendations import models as recommendation_models  # noqa: E402,F401

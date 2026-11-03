@@ -458,7 +458,14 @@ def sync_review_asset(db: Session, asset: MediaAsset) -> None:
 
 
 @router.post("/assets/{asset_id}/commit", response_model=CommitCandidatesResponse)
-def commit_candidates(asset_id: str, payload: CommitCandidatesRequest, db: DB, user: CurrentUser):
+def commit_candidates(
+    asset_id: str,
+    payload: CommitCandidatesRequest,
+    db: DB,
+    user: CurrentUser,
+    settings: Settings = Depends(get_settings),
+):
+    lock_user(db, user.id)
     asset = db.scalar(
         select(MediaAsset)
         .where(MediaAsset.id == asset_id, MediaAsset.user_id == user.id)
@@ -513,9 +520,15 @@ def commit_candidates(asset_id: str, payload: CommitCandidatesRequest, db: DB, u
         )
         db.add(garment)
         db.flush()
+        from garblo.recommendations.retrieval_jobs import refresh_profile
+
+        refresh_profile(db, garment, settings)
         candidate.garment_id, candidate.status = garment.id, "committed"
     sync_review_asset(db, asset)
     by_id = {candidate.id: candidate.garment_id for candidate in candidates}
+    from garblo.impact import sync_progress
+
+    sync_progress(db, user.id)
     db.commit()
     return CommitCandidatesResponse(garment_ids=[by_id[candidate_id] for candidate_id in ids])
 
@@ -550,7 +563,13 @@ def get_garment(garment_id: str, db: DB, user: CurrentUser):
 
 
 @router.patch("/garments/{garment_id}", response_model=GarmentResponse)
-def update_garment(garment_id: str, payload: GarmentPatch, db: DB, user: CurrentUser) -> Garment:
+def update_garment(
+    garment_id: str,
+    payload: GarmentPatch,
+    db: DB,
+    user: CurrentUser,
+    settings: Settings = Depends(get_settings),
+) -> Garment:
     garment = db.scalar(
         select(Garment)
         .where(Garment.id == garment_id, Garment.user_id == user.id)
@@ -564,6 +583,9 @@ def update_garment(garment_id: str, payload: GarmentPatch, db: DB, user: Current
                 garment.details_json = {**garment.details_json, **value}
         else:
             setattr(garment, field, value)
+    from garblo.recommendations.retrieval_jobs import refresh_profile
+
+    refresh_profile(db, garment, settings)
     db.commit()
     db.refresh(garment)
     return garment
