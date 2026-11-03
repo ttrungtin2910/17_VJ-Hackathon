@@ -84,6 +84,7 @@ def new_snapshot(settings: Settings, provider: str, kind: str) -> dict:
             schema_version=version,
             prompt_version=f"catalogue-v{version}",
             pipeline_version=f"catalogue-v{version}",
+            component_image_concurrency=settings.catalogue_component_image_concurrency,
             max_calls=settings.catalogue_max_calls,
             max_output_tokens=settings.catalogue_max_output_tokens,
             token_budget=settings.catalogue_token_budget,

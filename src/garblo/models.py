@@ -84,6 +84,19 @@ class MediaAsset(Timestamped, Base):
     )
 
 
+class AssetCleanup(Base):
+    __tablename__ = "asset_cleanup"
+
+    asset_id: Mapped[str] = mapped_column(
+        ForeignKey("media_assets.id", ondelete="CASCADE"), primary_key=True
+    )
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    next_attempt_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=now_utc, nullable=False, index=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class UploadOperation(Timestamped, Base):
     """Giữ định danh upload qua mất response; không lưu bytes ảnh hay key provider."""
 

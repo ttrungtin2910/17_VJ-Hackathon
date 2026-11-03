@@ -43,9 +43,10 @@ class Settings(BaseSettings):
     worker_lease_seconds: int = Field(default=900, ge=600)
     worker_retry_base_seconds: float = Field(default=5, gt=0)
     catalogue_schema_version: Literal[1, 2] = 2
-    catalogue_max_calls: int = Field(default=6, ge=1, le=20)
+    catalogue_component_image_concurrency: int = Field(default=5, ge=1, le=5)
+    catalogue_max_calls: int = Field(default=12, ge=1, le=20)
     catalogue_max_output_tokens: int = Field(default=4096, ge=256, le=8192)
-    catalogue_token_budget: int = Field(default=100_000, ge=1024)
+    catalogue_token_budget: int = Field(default=200_000, ge=1024)
     catalogue_call_token_reservation: int = Field(default=16384, ge=1024)
     catalogue_deadline_seconds: float = Field(default=300, gt=0, le=500)
     catalogue_native_structured_output: bool = False

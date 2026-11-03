@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from garblo.ai import AIProviderError
 from garblo.ai_providers.contracts import GarmentAttributes
+from garblo.asset_cleanup import TEMPORARY_INPUT
 from garblo.catalogue.metrics import summarize_catalogue
 from garblo.config import Settings, get_settings
 from garblo.consent import active_ai_consent, latest_consent
@@ -34,6 +35,7 @@ from garblo.models import (
     AiCallAttempt,
     AiJob,
     ApprovalRequest,
+    AssetCleanup,
     ConsentRecord,
     Garment,
     GarmentCandidate,
@@ -256,6 +258,9 @@ def upload_asset(
         checksum=checksum,
         byte_size=len(body),
         status="uploaded",
+        metadata_json={"retention_policy": TEMPORARY_INPUT}
+        if asset_type == "garment_photo"
+        else {},
     )
     storage = storage_or_503(settings)
     try:
@@ -324,7 +329,7 @@ def get_asset_download(
     asset_id: str, db: DB, user: CurrentUser, settings: Settings = Depends(get_settings)
 ) -> AssetDownloadResponse:
     asset = get_owned_asset_or_404(db, user.id, asset_id)
-    if asset.status == "deleted":
+    if asset.status == "deleted" or db.get(AssetCleanup, asset.id):
         raise HTTPException(
             status_code=410,
             detail={"code": "asset_deleted", "message": "Ảnh này đã bị xóa khỏi bộ nhớ."},
@@ -373,7 +378,11 @@ def catalogize_asset(
         user_id=user.id,
         job_type="catalogue",
         model_provider=provider,
-        input_ref={"asset_id": asset_id, **snapshot},
+        input_ref={
+            "asset_id": asset_id,
+            **snapshot,
+            "retention_policy": asset.metadata_json.get("retention_policy", "permanent"),
+        },
     )
     db.add(job)
     db.commit()
@@ -628,14 +637,35 @@ def delete_garment(
     asset_ids = list(
         dict.fromkeys(filter(None, [garment.source_asset_id, garment.component_asset_id]))
     )
+    # Ảnh gốc dùng chung chỉ là lineage; ảnh component mới là ảnh của món.
+    source = db.get(MediaAsset, garment.source_asset_id)
+    other_source = db.scalar(
+        select(Garment.id)
+        .where(
+            Garment.id != garment.id,
+            Garment.source_asset_id == garment.source_asset_id,
+        )
+        .limit(1)
+    )
+    pending_source = db.scalar(
+        select(GarmentCandidate.id)
+        .where(
+            GarmentCandidate.asset_id == garment.source_asset_id,
+            GarmentCandidate.status.in_(["draft", "rejected"]),
+        )
+        .limit(1)
+    )
+    if (
+        other_source
+        or pending_source
+        or source.metadata_json.get("retention_policy") == TEMPORARY_INPUT
+    ):
+        asset_ids = [aid for aid in asset_ids if aid != garment.source_asset_id]
     shared = db.scalar(
         select(Garment.id)
         .where(
             Garment.id != garment.id,
-            or_(
-                Garment.source_asset_id.in_(asset_ids),
-                Garment.component_asset_id.in_(asset_ids),
-            ),
+            or_(Garment.source_asset_id.in_(asset_ids), Garment.component_asset_id.in_(asset_ids)),
         )
         .limit(1)
     )

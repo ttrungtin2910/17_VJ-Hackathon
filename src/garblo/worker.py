@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from garblo.ai import AIProviderError, RenderedLook
 from garblo.ai_providers import ProviderRegistry
 from garblo.ai_providers.contracts import Analysis
+from garblo.asset_cleanup import TEMPORARY_INPUT, cleanup_next, schedule_cleanup
 from garblo.catalogue.budget import CallLedger
 from garblo.catalogue.fallback import execution_claim
 from garblo.catalogue.quality import assess_quality
@@ -113,6 +114,8 @@ class JobWorker:
             job.error_code = "worker_lease_expired"
             job.error_message = "Worker trước đã mất lease; kết quả chưa được xác nhận"
             self._sync_subject(job, failed)
+            if failed and job.job_type == "catalogue":
+                schedule_cleanup(self.db, self.db.get(MediaAsset, job.input_ref.get("asset_id")))
         self.db.commit()
         return len(expired)
 
@@ -135,6 +138,8 @@ class JobWorker:
             job.error_code, job.error_message = "retry_limit_exceeded", "Đã hết số lần xử lý"
             job.completed_at = utcnow()
             self._sync_subject(job, True)
+            if job.job_type == "catalogue":
+                schedule_cleanup(self.db, self.db.get(MediaAsset, job.input_ref.get("asset_id")))
             self.db.commit()
             return job
         job.status = "running"
@@ -166,6 +171,7 @@ class JobWorker:
             raise AIProviderError("Consent ai_processing không còn hiệu lực", "consent_revoked")
 
     def process_next(self) -> bool:
+        cleanup_next(self.db, self.storage)
         self.recover_expired()
         job = self.claim_next()
         if not job:
@@ -179,6 +185,21 @@ class JobWorker:
             job.model_provider,
             dict(job.input_ref),
             job.lock_token,
+        )
+        processing_started = time.monotonic()
+        queue_wait_ms = max(
+            0,
+            int(
+                (
+                    utcnow()
+                    - (
+                        job.created_at.replace(tzinfo=timezone.utc)
+                        if job.created_at.tzinfo is None
+                        else job.created_at
+                    )
+                ).total_seconds()
+                * 1000
+            ),
         )
         provider = None
         ledger = None
@@ -228,6 +249,7 @@ class JobWorker:
                 result = self._render(claim, provider)
             else:
                 raise AIProviderError("Loại job không được hỗ trợ", "unsupported_job_type")
+            save_started = time.monotonic()
             self.db.rollback()
             job = self._owned_claim(claim, lock=True)
             if not job:
@@ -243,6 +265,19 @@ class JobWorker:
                 output = self._save_analysis(claim, result)
             else:
                 output = self._save_render(claim, result)
+            output["timings_ms"] = {
+                "queue_wait": queue_wait_ms,
+                "processing": int((time.monotonic() - processing_started) * 1000),
+                "save": int((time.monotonic() - save_started) * 1000),
+            }
+            if isinstance(result, Analysis):
+                output["timings_ms"].update(
+                    {
+                        key: result.metadata[key]
+                        for key in ("recognition_ms", "component_images_ms")
+                        if key in result.metadata
+                    }
+                )
             job.output_ref = output
             job.status = "succeeded"
             job.error_code = job.error_message = None
@@ -284,6 +319,12 @@ class JobWorker:
                 )
                 job.lock_token = job.locked_at = None
                 self._sync_subject(job, not retry)
+                if job.job_type == "catalogue" and job.attempts >= attempt_limit(
+                    self.settings, job.input_ref
+                ):
+                    schedule_cleanup(
+                        self.db, self.db.get(MediaAsset, job.input_ref.get("asset_id"))
+                    )
                 self.db.commit()
             else:
                 self.db.rollback()
@@ -327,6 +368,9 @@ class JobWorker:
                 "Kết quả phân loại ảnh mâu thuẫn với components", "invalid_model_output"
             )
         segments = {part["candidate_index"]: part for part in analysis.metadata.get("segments", [])}
+        temporary = claim.ref.get("retention_policy") == TEMPORARY_INPUT
+        if temporary and any(i not in segments for i in range(len(analysis.result.items))):
+            raise AIProviderError("Món đồ thiếu ảnh riêng", "invalid_model_output")
         for index, attributes in enumerate(analysis.result.items):
             quality = assess_quality(attributes)
             basic, details, reasons = quality.attributes, quality.details, quality.reasons
@@ -374,6 +418,8 @@ class JobWorker:
             self.db.flush()
             ids.append(candidate.id)
         asset.status = "analyzed" if ids else "no_items"
+        if temporary:
+            schedule_cleanup(self.db, asset)
         return {
             "asset_id": asset.id,
             "candidate_ids": ids,

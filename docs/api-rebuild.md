@@ -176,3 +176,17 @@ không đưa key, ảnh, Base64 hoặc signed URL vào báo cáo.
 - `GET /v1/assets/{asset_id}`: `AssetResponse` hiện hữu, owner-only.
 - `GET /v1/assets/{asset_id}/jobs`: `JobResponse[]`, chỉ catalogue đúng owner/source; chưa enqueue trả `[]`. Nhiều job không phân biệt được trả 409 `ambiguous_catalogue_jobs`, không chọn newest và không expose `input_ref`.
 - Mất response 202 sau catalogize: tra jobs đúng asset; retry failed dùng `POST /v1/jobs/{job_id}/retry` hiện hữu, không reupload hoặc enqueue job mới.
+
+### Vòng đời ảnh đầu vào catalogue mới
+
+Upload `garment_photo` mới có `metadata.retention_policy=temporary_catalogue_input`.
+Job snapshot chính sách này; mỗi candidate thành công phải có `component_asset_id` riêng.
+Sau commit kết quả, ảnh gốc được đưa vào hàng đợi `asset_cleanup`; worker xóa object
+và thử lại khi storage lỗi, không gọi lại AI. Không cấp URL ảnh gốc từ lúc lên lịch dọn
+(`/download` trả 410); bản ghi nguồn, ID và trạng thái review vẫn được giữ.
+Ảnh gốc còn trong các lần retry có budget; hết attempts hoặc `no_items` cũng lên lịch dọn.
+Upload/job cũ không có chính sách này không bị tự động dọn.
+
+Xóa garment dùng ảnh component riêng, không chặn chỉ vì các món khác dùng chung nguồn.
+Ảnh nguồn legacy chỉ được xóa theo thao tác xóa món khi không còn món hoặc nháp cần nó.
+Candidate `status=deleted` vẫn phục vụ audit; frontend loại khỏi trình review.

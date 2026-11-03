@@ -65,6 +65,8 @@ services:
       start_period: 10s
 
   worker:
+    deploy:
+      replicas: ${GARBLO_WORKER_REPLICAS:-2}
     <<: *runtime
     command: [garblo-worker]
     depends_on:

@@ -104,3 +104,22 @@ def test_provider_specific_stage_models_never_cross_route(settings):
 def test_segmentation_endpoint_only_operator_http_without_credentials(url):
     with pytest.raises(ValidationError):
         Settings(_env_file=None, catalogue_segmentation_url=url)
+
+
+def test_catalogue_default_capacity_and_snapshot(monkeypatch):
+    for key in (
+        "CATALOGUE_MAX_CALLS",
+        "CATALOGUE_TOKEN_BUDGET",
+        "CATALOGUE_COMPONENT_IMAGE_CONCURRENCY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    configured = Settings(
+        _env_file=None,
+        openai_api_key="test",
+        openai_vlm_model="test",
+        openai_image_model="test-image",
+    )
+    snapshot = new_snapshot(configured, "openai", "catalogue")
+    assert snapshot["component_image_concurrency"] == 5
+    assert snapshot["max_calls"] == 12
+    assert snapshot["token_budget"] == 200000

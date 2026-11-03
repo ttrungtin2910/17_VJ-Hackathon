@@ -107,3 +107,20 @@ Sau đó gọi absolute path của `local-wsl/tests/test-live.sh`. Script kiểm
 Guard USD dùng trần bảo thủ theo giới hạn input của model và max completion/calls đã cấu hình, giá tài liệu $0,75 input/$4,5 output mỗi triệu tokens; **không** phải hard billing cap upstream hay ngân sách cho các job khác chạy đồng thời. Muốn ít calls hơn, operator hạ `CATALOGUE_MAX_CALLS` rõ ràng trong env và start lại trước khi chạy; script không tự tăng budget hoặc thử model hàng loạt.
 
 Entry point giữ operation references (không token/ảnh/URL ký) trong `.runtime/`, không auto retry inference và không tự review/commit thay người dùng. Sau phân tích cần mở lại đúng nháp trên FE, review/edit/commit rồi kiểm wardrobe, recommendation, feedback và refresh/stop/start. `no_items` không phải lưu thành công garment. Chưa có đủ phép/key/ảnh/budget trong lượt triển khai này nên live vẫn `NOT TESTED`.
+
+### Xử lý đồng thời và budget catalogue
+
+Mặc định Compose chạy `GARBLO_WORKER_REPLICAS=2`; mỗi container claim một job bằng PostgreSQL `SKIP LOCKED`. Healthcheck/heartbeat nằm riêng trong mỗi container. Profile test override một replica. Dùng giá trị 1 để giảm tải; script start giữ cấu hình replicas của Compose.
+
+Job mới snapshot `CATALOGUE_COMPONENT_IMAGE_CONCURRENCY=5`, `CATALOGUE_MAX_CALLS=12`, `CATALOGUE_TOKEN_BUDGET=200000`. Reservation mỗi call vẫn 16384 token, deadline vẫn 300 giây. Tối đa 10 request tạo ảnh cùng lúc với hai replica; tăng replica làm tăng tổng tải. Job cũ thiếu concurrency chạy tuần tự; retry giữ nguyên snapshot/budget cũ. Không tự ghi đè env hiện có.
+
+Rebuild/recreate API và worker để áp dụng mã/config mới. `output_ref.timings_ms` đo queue wait kể từ khi tạo job (gồm thời gian trước retry), thời gian xử lý và lưu; catalogue còn có thời gian nhận diện và tạo ảnh. Các thời gian lưu chưa bao gồm commit DB cuối. Cần benchmark provider thật và theo dõi 429/retry trước khi kết luận tốc độ; mock chỉ chứng minh đồng thời/mapping/audit, không chứng minh latency hay chi phí AI thực tế.
+
+### Ảnh gốc tạm thời cho upload mới
+
+Migration `20261103_0006` thêm hàng đợi `asset_cleanup`. Upload quần áo mới giữ ảnh
+gốc trong khi xử lý/retry; sau kết quả thành công, không có món hoặc hết attempts,
+worker dọn object ảnh gốc. Lỗi storage được thử lại độc lập với AI. Bản ghi nguồn
+vẫn phục vụ job/review; browser chỉ dùng ID ảnh component. Không tự dọn upload cũ.
+Có thể kiểm tra các hàng `completed_at IS NULL`, `attempts`, `next_attempt_at` trong
+`asset_cleanup` để theo dõi dọn ảnh tồn đọng; không in object URL ký hoặc credentials.

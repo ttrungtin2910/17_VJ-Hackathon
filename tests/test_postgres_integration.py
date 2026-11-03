@@ -475,3 +475,25 @@ def test_postgres_deadline_is_absolute_across_session_timezones(
         with pytest.raises(AIProviderError) as error:
             CallLedger(worker, claim).ensure_deadline()
         assert error.value.code == "job_deadline_exceeded"
+
+
+def test_two_workers_claim_different_jobs(
+    postgres_runtime, image_bytes, storage, providers, settings
+):
+    runtime = postgres_runtime
+    headers = auth_headers(runtime.client)
+    ids = {
+        catalogue(runtime.client, headers, upload(runtime.client, headers, image_bytes))
+        for _ in range(2)
+    }
+    barrier = Barrier(2, timeout=10)
+
+    def claim():
+        with runtime.factory() as db:
+            barrier.wait()
+            job = JobWorker(db, storage, providers, settings).claim_next()
+            return job.id
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(claim) for _ in range(2)]
+        assert {future.result() for future in futures} == ids

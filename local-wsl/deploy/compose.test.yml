@@ -8,6 +8,8 @@ services:
       FPT_VLM_API_KEY: ''
       AZURE_OPENAI_API_KEY: ''
   worker:
+    deploy:
+      replicas: 1
     environment:
       OPENAI_API_KEY: ''
       FPT_VLM_API_KEY: ''

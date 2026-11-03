@@ -36,6 +36,9 @@ def result(*, count=1, category="áo", color="xanh", uncertain=(), image_type=No
 
 
 class Ledger:
+    def finish_unknown(self):
+        pass
+
     def __init__(self, provider="fpt"):
         self.provider = provider
         self.stage = "analysis"
@@ -537,7 +540,7 @@ def test_registry_reusing_primary_fails_without_closing_primary(context):
 
 
 def test_segmentation_elapsed_timeout_closes_response(context, segmentation, monkeypatch):
-    clock = iter([0, 31, 32])
+    clock = iter([0, 0, 0, 0, 31, 32])
     monkeypatch.setattr(stages, "time", SimpleNamespace(monotonic=lambda: next(clock)))
     with pytest.raises(AIProviderError) as exc:
         run(context)

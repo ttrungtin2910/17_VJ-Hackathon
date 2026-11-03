@@ -249,6 +249,7 @@ def run_analysis_stages(
                 AnalysisResultV2(schema_version=2, image_type="unrelated", items=[]),
                 {"screening_image_type": "unrelated", "human_review_required": True},
             )
+    analysis_started = time.monotonic()
     analysis = _analyze(primary_provider, snapshot, image, mime, ledger, "analysis")
     escalated = False
     if escalation and (
@@ -259,6 +260,7 @@ def run_analysis_stages(
             worker, claim, escalation, image, mime, ledger, "escalation", primary_provider
         )
         escalated = True
+    ledger.finish_unknown()
     # Không tin metadata segments từ VLM; chỉ HTTP service được cấu hình mới tạo được.
     metadata = {key: value for key, value in analysis.metadata.items() if key != "segments"}
     metadata["analysis_model"] = escalation if escalated else snapshot["model"]
@@ -267,6 +269,8 @@ def run_analysis_stages(
         metadata["screening_image_type"] = screening_type
     if escalated:
         metadata["escalated"] = True
+    metadata["recognition_ms"] = int((time.monotonic() - analysis_started) * 1000)
+    images_started = time.monotonic()
     if segmentation_url and len(analysis.result.items) > 1:
         metadata["segments"] = _segment(
             worker, snapshot, image, mime, analysis.result.items, ledger, segmentation_url
@@ -279,10 +283,18 @@ def run_analysis_stages(
         metadata["segments"] = _generate_component_images(
             worker, claim, analysis, image, mime, ledger, primary_provider
         )
+    metadata["component_images_ms"] = int((time.monotonic() - images_started) * 1000)
     return Analysis(analysis.result, metadata)
 
 
 def _generate_component_images(worker, claim, analysis, image, mime, ledger, primary_provider):
+    concurrency = claim.ref.get("component_image_concurrency", 1)
+    if type(concurrency) is not int or not 1 <= concurrency <= 5:
+        raise AIProviderError("Cấu hình song song không hợp lệ", "provider_request_error")
+    if concurrency > 1:
+        from garblo.catalogue.component_images import generate_parallel
+
+        return generate_parallel(worker, claim, analysis, image, mime, primary_provider)
     image_model = claim.ref.get("image_model")
     if not image_model:
         raise AIProviderError("Job thiếu OpenAI image model", "provider_not_configured")
@@ -295,6 +307,8 @@ def _generate_component_images(worker, claim, analysis, image, mime, ledger, pri
     generate = getattr(generator, "generate_component_image", None)
     if not generate:
         raise AIProviderError("Provider không hỗ trợ tạo ảnh món đồ", "provider_not_supported")
+    generator.on_result = ledger.on_result
+    generator.on_validation = ledger.on_validation
     previous_provider = ledger.provider
     previous_stage, previous_model = ledger.stage, ledger.model
     segments = []

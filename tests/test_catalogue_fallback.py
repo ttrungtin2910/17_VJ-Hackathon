@@ -44,7 +44,12 @@ def test_transient_openai_failure_can_use_fpt(
     assert job.output_ref["effective_model"] == "Qwen2.5-VL-7B-Instruct"
     assert [call[1] for call in providers.calls] == ["openai", "openai", "fpt"]
     calls = list(db.scalars(select(AiCallAttempt).order_by(AiCallAttempt.call_index)))
-    assert [call.provider for call in calls] == ["openai", "openai", "fpt"]
+    assert [call.provider for call in calls if call.stage.startswith("analysis")] == [
+        "openai",
+        "openai",
+        "fpt",
+    ]
+    calls = [call for call in calls if call.stage.startswith("analysis")]
     assert [call.worker_attempt for call in calls] == [1, 2, 3]
     assert calls[-1].model == "Qwen2.5-VL-7B-Instruct"
     assert "test-only" not in str(original)

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import select, text
 
+from garblo.asset_cleanup import cleanup_next
 from garblo.models import Garment, GarmentCandidate, MediaAsset, new_id
 from garblo.recommendations.models import (
     RecommendationFeedback,
@@ -12,6 +13,7 @@ from garblo.recommendations.models import (
 )
 from garblo.recommendations.service import garment_snapshot
 from garblo.worker import JobWorker
+from tests.conftest import ATTRIBUTES
 from tests.helpers import auth_headers, committed_garment, upload
 from tests.test_postgres_integration import postgres_runtime as _postgres_runtime
 
@@ -61,6 +63,9 @@ def add_component_asset(db_factory, garment_id, storage):
 def test_delete_garment_removes_both_images_and_keeps_audit_rows(
     client, headers, asset_id, worker, storage, db_factory
 ):
+    with db_factory() as db:
+        db.get(MediaAsset, asset_id).metadata_json = {}
+        db.commit()
     garment_id = committed_garment(client, headers, asset_id, worker)
     component_id = add_component_asset(db_factory, garment_id, storage)
     with db_factory() as db:
@@ -141,9 +146,96 @@ def test_delete_garment_with_shared_image_is_rejected(
     assert response.json()["detail"]["code"] == "garment_asset_shared"
 
 
+@pytest.mark.parametrize(
+    "runtime_kind", ["sqlite", pytest.param("postgres", marks=pytest.mark.integration)]
+)
+@pytest.mark.parametrize("commit_other", [True, False])
+def test_delete_one_component_preserves_shared_source_and_other_candidate(
+    client,
+    headers,
+    asset_id,
+    worker,
+    providers,
+    storage,
+    db_factory,
+    commit_other,
+    runtime_kind,
+    request,
+    settings,
+    image_bytes,
+):
+    if runtime_kind == "postgres":
+        runtime = request.getfixturevalue("postgres_runtime")
+        client, db_factory = runtime.client, runtime.factory
+        headers = auth_headers(client)
+        asset_id = upload(client, headers, image_bytes)
+        worker = JobWorker(db_factory(), storage, providers, settings)
+        request.addfinalizer(worker.db.close)
+    from tests.test_catalogue_pipeline import v2_provider
+
+    items = [
+        dict(ATTRIBUTES),
+        {**ATTRIBUTES, "category": "hat", "color": "red"},
+    ]
+    from tests.helpers import catalogue
+
+    v2_provider(worker, items)
+    job_id = catalogue(client, headers, asset_id)
+    assert worker.process_next()
+    job = client.get(f"/v1/jobs/{job_id}", headers=headers).json()
+    assert job["status"] == "succeeded", job
+    candidate_ids = job["output_ref"]["candidate_ids"]
+    response = client.post(
+        f"/v1/assets/{asset_id}/commit",
+        headers=headers,
+        json={"candidate_ids": candidate_ids if commit_other else candidate_ids[:1]},
+    )
+    assert response.status_code == 200, response.text
+    garment_ids = response.json()["garment_ids"]
+    with db_factory() as db:
+        source_key = db.get(MediaAsset, asset_id).object_key
+        components = [db.get(GarmentCandidate, cid).component_asset_id for cid in candidate_ids]
+        component_keys = [db.get(MediaAsset, cid).object_key for cid in components]
+
+    deleted = client.delete(
+        f"/v1/garments/{garment_ids[0]}?delete_recommended_outfits=true", headers=headers
+    )
+
+    assert deleted.status_code == 204, deleted.text
+    assert source_key in storage.objects
+    assert component_keys[0] not in storage.objects
+    assert component_keys[1] in storage.objects
+    assert client.get(f"/v1/assets/{asset_id}/download", headers=headers).status_code == 410
+    with db_factory() as db:
+        assert db.get(MediaAsset, asset_id).status != "deleted"
+        assert db.get(MediaAsset, components[0]).status == "deleted"
+        assert db.get(MediaAsset, components[1]).status != "deleted"
+        assert db.get(GarmentCandidate, candidate_ids[0]).status == "deleted"
+        other = db.get(GarmentCandidate, candidate_ids[1])
+        assert other.status == ("committed" if commit_other else "draft")
+
+    if not commit_other:
+        response = client.post(
+            f"/v1/assets/{asset_id}/commit",
+            headers=headers,
+            json={"candidate_ids": candidate_ids[1:]},
+        )
+        assert response.status_code == 200, response.text
+        garment_ids.append(response.json()["garment_ids"][0])
+    assert client.get(f"/v1/garments/{garment_ids[1]}", headers=headers).status_code == 200
+    assert client.delete(f"/v1/garments/{garment_ids[1]}", headers=headers).status_code == 204
+    with db_factory() as db:
+        assert cleanup_next(db, storage)
+    assert source_key not in storage.objects
+    assert component_keys[1] not in storage.objects
+
+
 def test_storage_failure_keeps_garment_and_retry_completes(
     client, headers, asset_id, worker, storage, db_factory
 ):
+    with db_factory() as db:
+        db.get(MediaAsset, asset_id).metadata_json = {}
+        db.commit()
     garment_id = committed_garment(client, headers, asset_id, worker)
     add_component_asset(db_factory, garment_id, storage)
     original_delete = storage.delete
@@ -179,6 +271,8 @@ def deletion_case(request, client, db_factory, image_bytes, storage, providers, 
     headers = auth_headers(client, "recommendation-delete@example.com")
     asset_id = upload(client, headers, image_bytes)
     with runtime.factory() as db:
+        db.get(MediaAsset, asset_id).metadata_json = {}
+        db.commit()
         target_id = committed_garment(
             client, headers, asset_id, JobWorker(db, storage, providers, settings)
         )

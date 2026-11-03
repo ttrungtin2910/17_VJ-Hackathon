@@ -168,11 +168,21 @@ def test_component_image_invalid_output_is_retried_and_mapped_to_candidate(
     ]
 
 
+@pytest.mark.parametrize("concurrency", [1, 3, 5])
 def test_missing_component_image_at_call_budget_fails_without_candidates(
-    client, headers, asset_id, worker, db, settings
+    client, headers, asset_id, worker, db, settings, concurrency
 ):
     settings.catalogue_max_calls = 2
-    v2_provider(worker, [dict(ATTRIBUTES), {**ATTRIBUTES, "category": "pants"}])
+    settings.catalogue_component_image_concurrency = concurrency
+    primary = v2_provider(worker, [dict(ATTRIBUTES), {**ATTRIBUTES, "category": "pants"}])
+    resolved = 0
+
+    def resolve(*args):
+        nonlocal resolved
+        resolved += 1
+        return primary if resolved == 1 else type(primary)()
+
+    worker.providers = SimpleNamespace(resolve=resolve)
     job_id = catalogue(client, headers, asset_id)
     worker.process_next()
     job = db.get(AiJob, job_id)
@@ -530,5 +540,71 @@ def test_truncation_is_audited_as_repair_but_refusal_is_not_retried(
         assert count == len(calls) == 1
     else:
         assert job["status"] == "succeeded", job
-        assert [call["stage"] for call in calls] == ["analysis", "analysis_repair"]
-        assert [call["validation_status"] for call in calls] == ["invalid", "valid"]
+        assert [call["stage"] for call in calls] == [
+            "analysis",
+            "analysis_repair",
+            "component_image",
+        ]
+        assert [call["validation_status"] for call in calls] == ["invalid", "valid", None]
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_parallel_images_overlap_and_keep_candidate_mapping(
+    client, headers, asset_id, worker, db, settings, fail
+):
+    import threading
+
+    from PIL import Image
+
+    settings.catalogue_component_image_concurrency = 5
+    items = [{**ATTRIBUTES, "details": {"display_name": str(i)}} for i in range(5)]
+    primary = v2_provider(worker, items)
+    barrier = threading.Barrier(5, timeout=10)
+    main_thread = threading.get_ident()
+    seen = []
+
+    class Generator:
+        def generate_component_image(self, *, before_call, description, **kwargs):
+            assert threading.get_ident() != main_thread
+            before_call()
+            index = int(description["details"]["display_name"])
+            barrier.wait()
+            seen.append(index)
+            if fail and index == 0:
+                self.on_result({}, 1, "provider_timeout")
+                raise AIProviderError("Timeout", "provider_timeout")
+            output = io.BytesIO()
+            Image.new("RGBA", (8, 8), (index, 40, 60, 128)).save(output, format="PNG")
+            self.on_result({"total_tokens": 10}, index + 1, None)
+            return output.getvalue()
+
+    resolved = 0
+
+    def resolve(*args):
+        nonlocal resolved
+        resolved += 1
+        return primary if resolved == 1 else Generator()
+
+    worker.providers = SimpleNamespace(resolve=resolve)
+    job_id = catalogue(client, headers, asset_id)
+    worker.process_next()
+    job = db.get(AiJob, job_id)
+    if fail:
+        assert job.status != "succeeded"
+        assert db.scalar(select(func.count()).select_from(GarmentCandidate)) == 0
+        calls = list(db.scalars(select(AiCallAttempt).where(AiCallAttempt.job_id == job_id)))
+        assert len(calls) == 6
+        assert all(call.status != "reserved" for call in calls)
+        return
+    assert job.status == "succeeded", job.error_message
+    assert sorted(seen) == list(range(5))
+    candidates = list(
+        db.scalars(select(GarmentCandidate).order_by(GarmentCandidate.candidate_index))
+    )
+    for index, candidate in enumerate(candidates):
+        asset = db.get(MediaAsset, candidate.component_asset_id)
+        body = worker.storage.get_bytes(asset.object_key)
+        assert Image.open(io.BytesIO(body)).getpixel((0, 0))[0] == index
+    calls = list(db.scalars(select(AiCallAttempt).where(AiCallAttempt.job_id == job_id)))
+    assert len(calls) == 6
+    assert all(call.status == "succeeded" for call in calls)

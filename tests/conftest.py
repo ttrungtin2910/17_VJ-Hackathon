@@ -44,6 +44,7 @@ def settings(monkeypatch) -> Settings:
         openai_api_key="test-openai-key",
         openai_vlm_model="test-vision",
         openai_image_model="test-image",
+        catalogue_component_image_concurrency=1,
     )
 
 
@@ -137,6 +138,11 @@ def asset_id(client, headers, image_bytes):
 @pytest.fixture()
 def providers(image_bytes):
     class FakeProvider:
+        def generate_component_image(self, *, before_call, **kwargs):
+            before_call()
+            self.on_result({}, 1, None)
+            return image_bytes
+
         def configure_catalogue(self, snapshot):
             self.schema_version = snapshot.get("schema_version", 1)
 

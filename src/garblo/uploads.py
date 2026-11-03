@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from garblo.asset_cleanup import TEMPORARY_INPUT
 from garblo.models import MediaAsset, UploadOperation, User, new_id, now_utc
 from garblo.storage import storage_key
 
@@ -97,6 +98,9 @@ def upload_with_key(
             checksum=hashlib.sha256(body).hexdigest(),
             byte_size=len(body),
             status="uploaded",
+            metadata_json={"retention_policy": TEMPORARY_INPUT}
+            if asset_type == "garment_photo"
+            else {},
         )
         db.add(asset)
         db.flush()
